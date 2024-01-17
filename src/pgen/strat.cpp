@@ -75,7 +75,7 @@ Real HistorydVxVy(MeshBlock *pmb, int iout);
 
 // Apply a density floor - useful for large |z| regions
 Real dfloor, pfloor;
-Real Omega_0, qshear;
+Real Omega_0, qshear, H02;
 } // namespace
 
 //====================================================================================
@@ -183,10 +183,15 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
   }
 
   // Compute field strength based on beta.
+  H02 = 2. * SQR(iso_cs)/SQR(Omega_0);
   if (MAGNETIC_FIELDS_ENABLED) {
     B0 = std::sqrt(static_cast<Real>(2.0*pres/beta));
-    std::cout << "B0=" << B0 << std::endl;
+    H02 *= (1. + 1/beta);
+    if (Globals::my_rank==0) std::cout << "B0=" << B0 << std::endl;
+    if (Globals::my_rank==0) std::cout << "H0^2=" << H02 << std::endl;
   }
+  
+  
 
   // With viscosity and/or resistivity, read eta_Ohm and nu_V
   // (to be filled in) ???
@@ -205,7 +210,7 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
         // [default, used by HGB]
         if (ipert == 1) {
           rval = amp*(ran2(&iseed) - 0.5);
-          rd = den*std::exp(-x3*x3)*(1.0+2.0*rval);
+          rd = den*std::exp(-x3*x3 / H02)*(1.0+2.0*rval);
           if (rd < dfloor) rd = dfloor;
           SumRd += rd;
           if (NON_BAROTROPIC_EOS) {
@@ -225,7 +230,7 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
           SumRvz += rd*rvz;
           // no perturbations
         } else {
-          rd = den*std::exp(-x3*x3);
+          rd = den*std::exp(-x3*x3 / H02);
           rvx = 0;
           rvy = 0;
           rvz = 0;
@@ -300,11 +305,11 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
           if (ifield == 6) {
             // net toroidal field with constant \beta with height
             pfield->b.x1f(k,j,i) = 0.0;
-            pfield->b.x2f(k,j,i) = std::sqrt(den*std::exp(-x3*x3)*SQR(Omega_0)/beta);
+            pfield->b.x2f(k,j,i) = std::sqrt(2.*den*std::exp(-x3*x3 / H02)*SQR(iso_cs)/beta);
             pfield->b.x3f(k,j,i) = 0.0;
             if (i==ie) pfield->b.x1f(k,j,ie+1) = 0.0;
-            if (j==je) pfield->b.x2f(k,je+1,i) = std::sqrt(den*std::exp(-x3*x3)*
-                                                           SQR(Omega_0)/beta);
+            if (j==je) pfield->b.x2f(k,je+1,i) = std::sqrt(2.*den*std::exp(-x3*x3 / H02)*
+                                                           SQR(iso_cs)/beta);
             if (k==ke) pfield->b.x3f(ke+1,j,i) = 0.0;
           }
           if (ifield == 7) {
@@ -475,7 +480,7 @@ void StratOutflowInnerX3(MeshBlock *pmb, Coordinates *pco,
         }
         // Now extrapolate the density to balance gravity
         // assuming a constant temperature in the ghost zones
-        prim(IDN,kl-k,j,i) = den*std::exp(-(SQR(x3)-SQR(x3b))/
+        prim(IDN,kl-k,j,i) = den*std::exp(-(SQR(x3)-SQR(x3b))/H02/
                                           (2.0*Tkl/SQR(Omega_0)));
         // Copy the velocities, but not the momenta ---
         // important because of the density extrapolation above
@@ -549,7 +554,7 @@ void StratOutflowOuterX3(MeshBlock *pmb, Coordinates *pco,
         }
         // Now extrapolate the density to balance gravity
         // assuming a constant temperature in the ghost zones
-        prim(IDN,ku+k,j,i) = den*std::exp(-(SQR(x3)-SQR(x3b))/
+        prim(IDN,ku+k,j,i) = den*std::exp(-(SQR(x3)-SQR(x3b))/H02/
                                           (2.0*Tku/SQR(Omega_0)));
         // Copy the velocities, but not the momenta ---
         // important because of the density extrapolation above
