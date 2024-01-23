@@ -75,14 +75,28 @@ Real HistorydVxVy(MeshBlock *pmb, int iout);
 
 // Apply a density floor - useful for large |z| regions
 Real dfloor, pfloor;
-Real Omega_0, qshear, H02;
+Real Omega_0, qshear, H02, beta, den;
 } // namespace
 
 //====================================================================================
 void Mesh::InitUserMeshData(ParameterInput *pin) {
+  
+  // Some of these would normally be in ProblemGenerator but need for BCs
+  den = 1.0;
   // shearing sheet parameter
   qshear = pin->GetReal("orbital_advection","qshear");
   Omega_0 = pin->GetReal("orbital_advection","Omega0");
+  
+  Real iso_sound = pin->GetReal("hydro", "iso_sound_speed");
+  if (NON_BAROTROPIC_EOS)
+    iso_sound = std::sqrt( pin->GetOrAddReal("problem","pres",1.0) / den);
+  
+  H02 = 2. * SQR(iso_sound)/SQR(Omega_0);
+  if (MAGNETIC_FIELDS_ENABLED) {
+    beta = pin->GetReal("problem","beta");
+    H02 *= (1. + 1/beta);
+  }
+
 
   AllocateUserHistoryOutput(2);
   EnrollUserHistoryOutput(0, HistoryBxBy, "-BxBy");
@@ -118,7 +132,7 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
 //======================================================================================
 void MeshBlock::ProblemGenerator(ParameterInput *pin) {
   int ifield, ipert;
-  Real beta, amp, pres;
+  Real amp, pres;
   Real iso_cs=1.0;
   Real B0 = 0.0;
 
@@ -131,9 +145,6 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
   Real rvx, rvy, rvz;
   //Real rbx, rby, rbz;
   Real rval;
-
-  // initialize density
-  const Real den=1.0;
 
   // Initialize boxsize
   Real Lx = pmy_mesh->mesh_size.x1max - pmy_mesh->mesh_size.x1min;
@@ -171,7 +182,6 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
 
   if (MAGNETIC_FIELDS_ENABLED) {
     ifield = pin->GetOrAddInteger("problem","ifield", 1);
-    beta = pin->GetReal("problem","beta");
   }
 
   // Compute pressure based on the EOS.
@@ -183,10 +193,8 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
   }
 
   // Compute field strength based on beta.
-  H02 = 2. * SQR(iso_cs)/SQR(Omega_0);
   if (MAGNETIC_FIELDS_ENABLED) {
     B0 = std::sqrt(static_cast<Real>(2.0*pres/beta));
-    H02 *= (1. + 1/beta);
     if (Globals::my_rank==0) std::cout << "B0=" << B0 << std::endl;
     if (Globals::my_rank==0) std::cout << "H0^2=" << H02 << std::endl;
   }
