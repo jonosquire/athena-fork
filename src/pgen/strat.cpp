@@ -75,28 +75,31 @@ Real HistorydVxVy(MeshBlock *pmb, int iout);
 
 // Apply a density floor - useful for large |z| regions
 Real dfloor, pfloor;
-Real Omega_0, qshear, H02, beta, den;
+Real Omega_0, qshear, H02, beta, central_den;
 } // namespace
 
 //====================================================================================
 void Mesh::InitUserMeshData(ParameterInput *pin) {
   
   // Some of these would normally be in ProblemGenerator but need for BCs
-  den = 1.0;
+  central_den = 1.0;
   // shearing sheet parameter
   qshear = pin->GetReal("orbital_advection","qshear");
   Omega_0 = pin->GetReal("orbital_advection","Omega0");
   
   Real iso_sound = pin->GetReal("hydro", "iso_sound_speed");
   if (NON_BAROTROPIC_EOS)
-    iso_sound = std::sqrt( pin->GetOrAddReal("problem","pres",1.0) / den);
+    iso_sound = std::sqrt( pin->GetOrAddReal("problem","pres",1.0) / central_den);
   
-  H02 = 2. * SQR(iso_sound)/SQR(Omega_0);
+  H02 = 2.*SQR(iso_sound)/SQR(Omega_0);
   if (MAGNETIC_FIELDS_ENABLED) {
     beta = pin->GetReal("problem","beta");
     H02 *= (1. + 1/beta);
   }
 
+  Real float_min = std::numeric_limits<float>::min();
+  dfloor=pin->GetOrAddReal("hydro","dfloor",(1024*(float_min)));
+  pfloor=pin->GetOrAddReal("hydro","pfloor",(1024*(float_min)));
 
   AllocateUserHistoryOutput(2);
   EnrollUserHistoryOutput(0, HistoryBxBy, "-BxBy");
@@ -176,9 +179,6 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
   amp = pin->GetReal("problem","amp");
   ipert = pin->GetOrAddInteger("problem","ipert", 1);
 
-  Real float_min = std::numeric_limits<float>::min();
-  dfloor=pin->GetOrAddReal("hydro","dfloor",(1024*(float_min)));
-  pfloor=pin->GetOrAddReal("hydro","pfloor",(1024*(float_min)));
 
   if (MAGNETIC_FIELDS_ENABLED) {
     ifield = pin->GetOrAddInteger("problem","ifield", 1);
@@ -189,7 +189,7 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
     pres  = pin->GetOrAddReal("problem","pres",1.0);
   } else {
     iso_cs = peos->GetIsoSoundSpeed();
-    pres = den*SQR(iso_cs);
+    pres = central_den*SQR(iso_cs);
   }
 
   // Compute field strength based on beta.
@@ -218,11 +218,11 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
         // [default, used by HGB]
         if (ipert == 1) {
           rval = amp*(ran2(&iseed) - 0.5);
-          rd = den*std::exp(-x3*x3 / H02)*(1.0+2.0*rval);
+          rd = central_den*std::exp(-x3*x3 / H02)*(1.0+2.0*rval);
           if (rd < dfloor) rd = dfloor;
           SumRd += rd;
           if (NON_BAROTROPIC_EOS) {
-            rp = pres/den*rd;
+            rp = pres/central_den*rd;
             if (rp < pfloor) rp = pfloor;
           }
           rval = amp*(ran2(&iseed) - 0.5);
@@ -238,7 +238,7 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
           SumRvz += rd*rvz;
           // no perturbations
         } else {
-          rd = den*std::exp(-x3*x3 / H02);
+          rd = central_den*std::exp(-x3*x3 / H02);
           rvx = 0;
           rvy = 0;
           rvz = 0;
@@ -313,10 +313,10 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
           if (ifield == 6) {
             // net toroidal field with constant \beta with height
             pfield->b.x1f(k,j,i) = 0.0;
-            pfield->b.x2f(k,j,i) = std::sqrt(2.*den*std::exp(-x3*x3 / H02)*SQR(iso_cs)/beta);
+            pfield->b.x2f(k,j,i) = std::sqrt(2.*central_den*std::exp(-x3*x3 / H02)*SQR(iso_cs)/beta);
             pfield->b.x3f(k,j,i) = 0.0;
             if (i==ie) pfield->b.x1f(k,j,ie+1) = 0.0;
-            if (j==je) pfield->b.x2f(k,je+1,i) = std::sqrt(2.*den*std::exp(-x3*x3 / H02)*
+            if (j==je) pfield->b.x2f(k,je+1,i) = std::sqrt(2.*central_den*std::exp(-x3*x3 / H02)*
                                                            SQR(iso_cs)/beta);
             if (k==ke) pfield->b.x3f(ke+1,j,i) = 0.0;
           }
