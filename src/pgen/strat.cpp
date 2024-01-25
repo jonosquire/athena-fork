@@ -69,6 +69,15 @@ void StratOutflowOuterX3(MeshBlock *pmb, Coordinates *pco,
                          AthenaArray<Real> &a,
                          FaceField &b, Real time, Real dt,
                          int il, int iu, int jl, int ju, int kl, int ku, int ngh);
+void StratLesurInnerX3(MeshBlock *pmb, Coordinates *pco,
+                       AthenaArray<Real> &prim, FaceField &b,
+                       Real time, Real dt,
+                       int il, int iu, int jl, int ju, int kl, int ku, int ngh);
+void StratLesurOuterX3(MeshBlock *pmb, Coordinates *pco,
+                       AthenaArray<Real> &prim, FaceField &b,
+                       Real time, Real dt,
+                       int il, int iu, int jl, int ju, int kl, int ku, int ngh);
+
 namespace {
 Real HistoryBxBy(MeshBlock *pmb, int iout);
 Real HistorydVxVy(MeshBlock *pmb, int iout);
@@ -111,10 +120,13 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
 
   // enroll user-defined boundary conditions
   if (mesh_bcs[BoundaryFace::inner_x3] == GetBoundaryFlag("user")) {
-    EnrollUserBoundaryFunction(BoundaryFace::inner_x3, StratOutflowInnerX3);
+//    EnrollUserBoundaryFunction(BoundaryFace::inner_x3, StratOutflowInnerX3);
+    EnrollUserBoundaryFunction(BoundaryFace::inner_x3, StratLesurInnerX3);
+    if (Globals::my_rank==0) std::cout << "Warning: using Lesur boundary conditions\n";
   }
   if (mesh_bcs[BoundaryFace::outer_x3] == GetBoundaryFlag("user")) {
-    EnrollUserBoundaryFunction(BoundaryFace::outer_x3, StratOutflowOuterX3);
+//    EnrollUserBoundaryFunction(BoundaryFace::outer_x3, StratOutflowOuterX3);
+    EnrollUserBoundaryFunction(BoundaryFace::outer_x3, StratLesurOuterX3);
   }
 
   if (!shear_periodic) {
@@ -581,6 +593,121 @@ void StratOutflowOuterX3(MeshBlock *pmb, Coordinates *pco,
   }
   return;
 }
+
+// BCs from Lesur et al. 2013
+void StratLesurInnerX3(MeshBlock *pmb, Coordinates *pco,
+                         AthenaArray<Real> &prim, FaceField &b,
+                         Real time, Real dt,
+                         int il, int iu, int jl, int ju, int kl, int ku, int ngh) {
+  // Bx is set to zero to allow in plane current
+  if (MAGNETIC_FIELDS_ENABLED) {
+    for (int k=1; k<=ngh; k++) {
+      for (int j=jl; j<=ju; j++) {
+        for (int i=il; i<=iu+1; i++) {
+          b.x1f(kl-k,j,i) = 0.;
+        }
+      }
+    }
+    for (int k=1; k<=ngh; k++) {
+      for (int j=jl; j<=ju+1; j++) {
+        for (int i=il; i<=iu; i++) {
+          b.x2f(kl-k,j,i) = b.x2f(kl,j,i);
+        }
+      }
+    }
+    for (int k=1; k<=ngh; k++) {
+      for (int j=jl; j<=ju; j++) {
+        for (int i=il; i<=iu; i++) {
+          b.x3f(kl-k,j,i) = b.x3f(kl,j,i);
+        }
+      }
+    }
+  } // MHD
+
+
+  for (int k=1; k<=ngh; k++) {
+    for (int j=jl; j<=ju; j++) {
+      for (int i=il; i<=iu; i++) {
+        Real x3 = pco->x3v(kl-k);
+        Real x3b = pco->x3v(kl);
+        Real den = prim(IDN,kl,j,i);
+        
+        // Outflow on rho
+        prim(IDN,kl-k,j,i) = prim(IDN,kl,j,i);
+        // outflow on v
+        prim(IVX,kl-k,j,i) = prim(IVX,kl,j,i);
+        prim(IVY,kl-k,j,i) = prim(IVY,kl,j,i);
+        // If there's inflow into the grid, set the normal velocity to zero
+        if (prim(IVZ,kl,j,i) >= 0.0) {
+          prim(IVZ,kl-k,j,i) = 0.0;
+        } else {
+          prim(IVZ,kl-k,j,i) = prim(IVZ,kl,j,i);
+        }
+        if (NON_BAROTROPIC_EOS)
+          prim(IPR,kl-k,j,i) = prim(IPR,kl,j,i);
+      }
+    }
+  }
+  return;
+}
+
+// BCs from Lesur et al. 2013
+void StratLesurOuterX3(MeshBlock *pmb, Coordinates *pco,
+                         AthenaArray<Real> &prim,
+                         FaceField &b, Real time, Real dt,
+                         int il, int iu, int jl, int ju, int kl, int ku, int ngh) {
+  // Copy field components from last physical zone
+  if (MAGNETIC_FIELDS_ENABLED) {
+    for (int k=1; k<=ngh; k++) {
+      for (int j=jl; j<=ju; j++) {
+        for (int i=il; i<=iu+1; i++) {
+          b.x1f(ku+k,j,i) = 0.;
+        }
+      }
+    }
+    for (int k=1; k<=ngh; k++) {
+      for (int j=jl; j<=ju+1; j++) {
+        for (int i=il; i<=iu; i++) {
+          b.x2f(ku+k,j,i) = b.x2f(ku,j,i);
+        }
+      }
+    }
+    for (int k=1; k<=ngh; k++) {
+      for (int j=jl; j<=ju; j++) {
+        for (int i=il; i<=iu; i++) {
+          b.x3f(ku+1+k,j,i) = b.x3f(ku+1,j,i);
+        }
+      }
+    }
+  } // MHD
+
+  for (int k=1; k<=ngh; k++) {
+    for (int j=jl; j<=ju; j++) {
+      for (int i=il; i<=iu; i++) {
+        Real x3 = pco->x3v(ku+k);
+        Real x3b = pco->x3v(ku);
+        Real den = prim(IDN,ku,j,i);
+        
+        // Outflow on rho
+        prim(IDN,ku+k,j,i) = prim(IDN,ku,j,i);
+        // Copy the velocities, but not the momenta
+        prim(IVX,ku+k,j,i) = prim(IVX,ku,j,i);
+        prim(IVY,ku+k,j,i) = prim(IVY,ku,j,i);
+        // If there's inflow into the grid, set the normal velocity to zero
+        if (prim(IVZ,ku,j,i) <= 0.0) {
+          prim(IVZ,ku+k,j,i) = 0.0;
+        } else {
+          prim(IVZ,ku+k,j,i) = prim(IVZ,ku,j,i);
+        }
+        if (NON_BAROTROPIC_EOS)
+          prim(IPR,ku+k,j,i) = prim(IPR,ku+k,j,i);
+      }
+    }
+  }
+  return;
+}
+
+
 
 namespace {
 
