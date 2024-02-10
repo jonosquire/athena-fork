@@ -95,6 +95,7 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   // shearing sheet parameter
   qshear = pin->GetReal("orbital_advection","qshear");
   Omega_0 = pin->GetReal("orbital_advection","Omega0");
+  if (Omega_0<0.01) Omega_0=1.; // For runs without rotation use Omega_0=0.001 and q=1
   
   Real iso_sound = pin->GetReal("hydro", "iso_sound_speed");
   if (NON_BAROTROPIC_EOS)
