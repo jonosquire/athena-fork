@@ -508,11 +508,11 @@ void StratOutflowInnerX3(MeshBlock *pmb, Coordinates *pco,
         prim(IVX,kl-k,j,i) = prim(IVX,kl,j,i);
         prim(IVY,kl-k,j,i) = prim(IVY,kl,j,i);
         // If there's inflow into the grid, set the normal velocity to zero
-        if (prim(IVZ,kl,j,i) >= 0.0) {
-          prim(IVZ,kl-k,j,i) = 0.0;
-        } else {
+//        if (prim(IVZ,kl,j,i) >= 0.0) {
+//          prim(IVZ,kl-k,j,i) = 0.0;
+//        } else {
           prim(IVZ,kl-k,j,i) = prim(IVZ,kl,j,i);
-        }
+//        }
         if (NON_BAROTROPIC_EOS)
           prim(IPR,kl-k,j,i) = prim(IDN,kl-k,j,i)*Tkl;
       }
@@ -582,11 +582,11 @@ void StratOutflowOuterX3(MeshBlock *pmb, Coordinates *pco,
         prim(IVX,ku+k,j,i) = prim(IVX,ku,j,i);
         prim(IVY,ku+k,j,i) = prim(IVY,ku,j,i);
         // If there's inflow into the grid, set the normal velocity to zero
-        if (prim(IVZ,ku,j,i) <= 0.0) {
-          prim(IVZ,ku+k,j,i) = 0.0;
-        } else {
+//        if (prim(IVZ,ku,j,i) <= 0.0) {
+//          prim(IVZ,ku+k,j,i) = 0.0;
+//        } else {
           prim(IVZ,ku+k,j,i) = prim(IVZ,ku,j,i);
-        }
+//        }
         if (NON_BAROTROPIC_EOS)
           prim(IPR,ku+k,j,i) = prim(IDN,ku+k,j,i)*Tku;
       }
