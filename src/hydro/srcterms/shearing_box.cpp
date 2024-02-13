@@ -49,10 +49,11 @@ void HydroSourceTerms::ShearingBoxSourceTerms(const Real dt,
         for (int i=pmb->is; i<=pmb->ie; ++i) {
           const Real &den = prim(IDN,k,j,i);
           const Real qO2  = qshear_*SQR(Omega_0_);
+          const Real Om = mult_omega_fac_*Omega_0_;
           const Real mom1 = den*prim(IVX,k,j,i);
           const Real &xc  = pmb->pcoord->x1v(i);
-          cons(IM1,k,j,i) += 2.0*dt*(Omega_0_*(den*prim(IVY,k,j,i))+qO2*den*xc);
-          cons(IM2,k,j,i) -= 2.0*dt*Omega_0_*mom1;
+          cons(IM1,k,j,i) += 2.0*dt*(Om*(den*prim(IVY,k,j,i)) + qO2*den*xc);
+          cons(IM2,k,j,i) -= 2.0*dt*Om*mom1;
           if (NON_BAROTROPIC_EOS) {
             const Real phic = qO2*SQR(xc);
             const Real phil = qO2*SQR(pmb->pcoord->x1f(i));
@@ -71,10 +72,11 @@ void HydroSourceTerms::ShearingBoxSourceTerms(const Real dt,
       for (int i=pmb->is; i<=pmb->ie; ++i) {
         const Real &den = prim(IDN,ks,j,i);
         const Real qO2  = qshear_*SQR(Omega_0_);
+        const Real Om = mult_omega_fac_*Omega_0_;
         const Real mom1 = den*prim(IVX,ks,j,i);
         const Real &xc  = pmb->pcoord->x1v(i);
-        cons(IM1,ks,j,i) += 2.0*dt*(Omega_0_*(den*prim(IVZ,ks,j,i))+qO2*den*xc);
-        cons(IM3,ks,j,i) -= 2.0*dt*Omega_0_*mom1;
+        cons(IM1,ks,j,i) += 2.0*dt*(Om*(den*prim(IVZ,ks,j,i))+qO2*den*xc);
+        cons(IM3,ks,j,i) -= 2.0*dt*Om*mom1;
         if (NON_BAROTROPIC_EOS) {
           const Real phic = qO2*SQR(xc);
           const Real phil = qO2*SQR(pmb->pcoord->x1f(i));

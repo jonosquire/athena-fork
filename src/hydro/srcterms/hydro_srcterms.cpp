@@ -77,6 +77,7 @@ HydroSourceTerms::HydroSourceTerms(Hydro *phyd, ParameterInput *pin) {
   // read shearing box parameters from input block
   Omega_0_ = pin->GetOrAddReal("orbital_advection","Omega0",0.0);
   qshear_  = pin->GetOrAddReal("orbital_advection","qshear",0.0);
+  mult_omega_fac_ = pin->GetOrAddReal("orbital_advection","mult_omega_factor",1.0);
   ShBoxCoord_ = pin->GetOrAddInteger("orbital_advection","shboxcoord",1);
 
   // check flag for shearing source
