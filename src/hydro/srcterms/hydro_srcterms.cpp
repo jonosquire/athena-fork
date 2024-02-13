@@ -102,6 +102,8 @@ HydroSourceTerms::HydroSourceTerms(Hydro *phyd, ParameterInput *pin) {
               || std::strcmp(COORDINATE_SYSTEM, "spherical_polar") == 0)) {
     flag_shearing_source_ = 3; // rotating system source terms
   }
+  
+  Omega_0_ = Omega_0_ * mult_omega_fac_; // Only for shearing_box source terms, not shear itself
 
   if (flag_shearing_source_ != 0)
     hydro_sourceterms_defined = true;
