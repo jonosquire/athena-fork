@@ -216,7 +216,7 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
   // vertical field for ifield==6
   betaz = pin->GetOrAddInteger("problem","betaz", 0.0);
   if (betaz > 0.0) B0z = std::sqrt(static_cast<Real>(2.0*pres/betaz));
-  
+  if (Globals::my_rank==0) std::cout << "B0z=" << B0z << std::endl;
   
 
   // With viscosity and/or resistivity, read eta_Ohm and nu_V
