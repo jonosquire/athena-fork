@@ -84,7 +84,7 @@ Real HistorydVxVy(MeshBlock *pmb, int iout);
 
 // Apply a density floor - useful for large |z| regions
 Real dfloor, pfloor;
-Real Omega_0, qshear, H02, beta, central_den;
+Real Omega_0, qshear, H02, beta, central_den, betaz;
 } // namespace
 
 //====================================================================================
@@ -151,6 +151,7 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
   Real amp, pres;
   Real iso_cs=1.0;
   Real B0 = 0.0;
+  Real B0z = 0.0; // just for ifield =6
 
   Real SumRd=0.0, SumRvx=0.0, SumRvy=0.0, SumRvz=0.0;
   // TODO(felker): tons of unused variables in this file: xmin, xmax, rbx, rby, Ly, ky,...
@@ -211,6 +212,10 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
     if (Globals::my_rank==0) std::cout << "B0=" << B0 << std::endl;
     if (Globals::my_rank==0) std::cout << "H0^2=" << H02 << std::endl;
   }
+  
+  // vertical field for ifield==6
+  betaz = pin->GetOrAddInteger("problem","betaz", 0.0);
+  if (betaz > 0.0) B0z = std::sqrt(static_cast<Real>(2.0*pres/betaz));
   
   
 

@@ -78,7 +78,7 @@ HydroSourceTerms::HydroSourceTerms(Hydro *phyd, ParameterInput *pin) {
   Omega_0_ = pin->GetOrAddReal("orbital_advection","Omega0",0.0);
   qshear_  = pin->GetOrAddReal("orbital_advection","qshear",0.0);
   mult_omega_fac_ = pin->GetOrAddReal("orbital_advection","mult_omega_factor",1.0);
-  if (Globals::my_rank==0 && mult_omega_fac_ != 1.0) std::cout << ">>>>>>>  Multiplying Omega_0 by " << mult_omega_fac_ <<"\n";
+  if (Globals::my_rank==0 && mult_omega_fac_ != 1.0) std::cout << ">>>>>>>  Multiplying Omega_0 in source terms by " << mult_omega_fac_ <<"\n";
   ShBoxCoord_ = pin->GetOrAddInteger("orbital_advection","shboxcoord",1);
 
   // check flag for shearing source
