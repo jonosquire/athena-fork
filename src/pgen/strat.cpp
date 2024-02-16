@@ -104,7 +104,7 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   H02 = 2.*SQR(iso_sound)/SQR(Omega_0);
   if (MAGNETIC_FIELDS_ENABLED) {
     beta = pin->GetReal("problem","beta");
-    H02 *= (1. + 1/beta);
+    if (pin->GetInteger("problem","ifield")==6) H02 *= (1. + 1/beta);
   }
 
   Real float_min = std::numeric_limits<float>::min();
@@ -320,7 +320,7 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
             if (j==je) pfield->b.x2f(k,je+1,i) = B0*(std::cos(static_cast<Real>(kx)*x1));
             if (k==ke) pfield->b.x3f(ke+1,j,i) = B0*(std::sin(static_cast<Real>(kx)*x1));
           }
-          if (ifield == 5 && std::abs(x3) < 2.0) {
+          if (ifield == 5 ) {
             pfield->b.x1f(k,j,i) = 0.0;
             pfield->b.x2f(k,j,i) = B0;
             pfield->b.x3f(k,j,i) = 0.0;
