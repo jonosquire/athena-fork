@@ -332,7 +332,7 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
             // net toroidal field with constant \beta with height
             pfield->b.x1f(k,j,i) = 0.0;
             pfield->b.x2f(k,j,i) = std::sqrt(2.*central_den*std::exp(-x3*x3 / H02)*SQR(iso_cs)/beta);
-            pfield->b.x3f(k,j,i) = 0.0;
+            pfield->b.x3f(k,j,i) = B0z;
             if (i==ie) pfield->b.x1f(k,j,ie+1) = 0.0;
             if (j==je) pfield->b.x2f(k,je+1,i) = std::sqrt(2.*central_den*std::exp(-x3*x3 / H02)*
                                                            SQR(iso_cs)/beta);
