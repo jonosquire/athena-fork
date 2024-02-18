@@ -333,10 +333,10 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
           }
           if (ifield == 5 ) {
             pfield->b.x1f(k,j,i) = 0.0;
-            pfield->b.x2f(k,j,i) = B0;
+            pfield->b.x2f(k,j,i) = B0*std::sqrt(std::exp(-x3*x3 / 25));
             pfield->b.x3f(k,j,i) = 0.0;
             if (i==ie) pfield->b.x1f(k,j,ie+1) = 0.0;
-            if (j==je) pfield->b.x2f(k,je+1,i) = B0;
+            if (j==je) pfield->b.x2f(k,je+1,i) = B0*std::sqrt(std::exp(-x3*x3 / 25));
             if (k==ke) pfield->b.x3f(ke+1,j,i) = 0.0;
           }
           if (ifield == 6) {
