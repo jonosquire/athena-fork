@@ -163,6 +163,7 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
   Real iso_cs=1.0;
   Real B0 = 0.0;
   Real B0z = 0.0; // just for ifield =6
+  Real awdth; // just for ifield = 8. This is width of Lorentzian function 1/(a^2+z^2)
 
   Real SumRd=0.0, SumRvx=0.0, SumRvy=0.0, SumRvz=0.0;
   // TODO(felker): tons of unused variables in this file: xmin, xmax, rbx, rby, Ly, ky,...
@@ -207,7 +208,9 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
 
   if (MAGNETIC_FIELDS_ENABLED) {
     ifield = pin->GetOrAddInteger("problem","ifield", 1);
+    awdth = pin->GetOrAddReal("problem", "awidth", 1.0); // Just for ifield=8.
   }
+  
 
   // Compute pressure based on the EOS.
   if (NON_BAROTROPIC_EOS) {
@@ -241,11 +244,11 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
         // x1f = pcoord->x1f(i);
         // x2f = pcoord->x2f(j);
         // x3f = pcoord->x3f(k);
-
+        
         // Initialize perturbations
         // ipert = 1 - random perturbations to P/d and V
         // [default, used by HGB]
-        if (ipert == 1) {
+        if (ipert == 1 && ifield <8) {
           rval = amp*(ran2(&iseed) - 0.5);
           rd = central_den*std::exp(-x3*x3 / H02)*(1.0+2.0*rval);
           if (rd < dfloor) rd = dfloor;
@@ -257,15 +260,20 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
           rval = amp*(ran2(&iseed) - 0.5);
           rvx = (0.4/std::sqrt(3.0)) *rval*1e-3;
           SumRvx += rd*rvx;
-
+          
           rval = amp*(ran2(&iseed) - 0.5);
           rvy = (0.4/std::sqrt(3.0)) *rval*1e-3;
           SumRvy += rd*rvy;
-
+          
           rval = amp*(ran2(&iseed) - 0.5);
           rvz = (0.4/std::sqrt(3.0)) *rval*1e-3;
           SumRvz += rd*rvz;
           // no perturbations
+        } else if (ifield == 8) {
+          rd = 2.*CUBE(awdth)/PI/SQR(SQR(awdth) + SQR(x3)); // Could generalize to other power laws
+          rvx = 0;
+          rvy = 0;
+          rvz = 0;
         } else {
           rd = central_den*std::exp(-x3*x3 / H02);
           rvx = 0;
@@ -356,6 +364,17 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
             pfield->b.x3f(k,j,i) = 0.0;
             if (i==ie) pfield->b.x1f(k,j,ie+1) = 0.0;
             if (j==je) pfield->b.x2f(k,je+1,i) = 0.0;
+            if (k==ke) pfield->b.x3f(ke+1,j,i) = 0.0;
+          }
+          if (ifield == 8) {
+            // Lorenzian power-law like solution
+            pfield->b.x1f(k,j,i) = 0.0;
+            pfield->b.x2f(k,j,i) = std::sqrt(2.*CUBE(awdth)/PI * (-2.*SQR(iso_cs) + SQR(Omega_0)*(SQR(awdth)+SQR(x3))) /
+                                             SQR(SQR(awdth)+SQR(x3)) ); // See ParkerModeStability.nb
+            pfield->b.x3f(k,j,i) = 0.0;
+            if (i==ie) pfield->b.x1f(k,j,ie+1) = 0.0;
+            if (j==je) pfield->b.x2f(k,je+1,i) = std::sqrt(2.*CUBE(awdth)/PI * (-2.*SQR(iso_cs) + SQR(Omega_0)*(SQR(awdth)+SQR(x3))) /
+                                                           SQR(SQR(awdth)+SQR(x3)) );
             if (k==ke) pfield->b.x3f(ke+1,j,i) = 0.0;
           }
         } // MHD
