@@ -270,10 +270,22 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
           SumRvz += rd*rvz;
           // no perturbations
         } else if (ifield == 8) {
-          rd = 2.*CUBE(awdth)/PI/SQR(SQR(awdth) + SQR(x3)); // Could generalize to other power laws
-          rvx = 0;
-          rvy = 0;
-          rvz = 0;
+          rval = amp*(ran2(&iseed) - 0.5);
+          rd = 2.*CUBE(awdth)/PI/SQR(SQR(awdth) + SQR(x3))*(1.0+2.0*rval); // Could generalize to other power laws
+          if (rd < dfloor) rd = dfloor;
+          SumRd += rd;
+          
+          rval = amp*(ran2(&iseed) - 0.5);
+          rvx = (0.4/std::sqrt(3.0)) *rval*1e-3;
+          SumRvx += rd*rvx;
+          
+          rval = amp*(ran2(&iseed) - 0.5);
+          rvy = (0.4/std::sqrt(3.0)) *rval*1e-3;
+          SumRvy += rd*rvy;
+          
+          rval = amp*(ran2(&iseed) - 0.5);
+          rvz = (0.4/std::sqrt(3.0)) *rval*1e-3;
+          SumRvz += rd*rvz;
         } else {
           rd = central_den*std::exp(-x3*x3 / H02);
           rvx = 0;
