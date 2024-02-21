@@ -112,7 +112,7 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   H02 = 2.*SQR(iso_sound)/SQR(Omega_0);
   if (MAGNETIC_FIELDS_ENABLED) {
     beta = pin->GetReal("problem","beta");
-    if (pin->GetInteger("problem","ifield")==6) H02 *= (1. + 1/beta);
+    H02 *= (1. + 1/beta);
   }
 
   Real float_min = std::numeric_limits<float>::min();
