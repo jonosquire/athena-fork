@@ -92,7 +92,7 @@ Real HistorydVxVy(MeshBlock *pmb, int iout);
 
 // Apply a density floor - useful for large |z| regions
 Real dfloor, pfloor;
-Real Omega_0, qshear, H02, beta, central_den, betaz;
+Real Omega_0, qshear, H02, beta, central_den, betaz, betax;
 } // namespace
 
 //====================================================================================
@@ -110,6 +110,7 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
     iso_sound = std::sqrt( pin->GetOrAddReal("problem","pres",1.0) / central_den);
   
   H02 = 2.*SQR(iso_sound)/SQR(Omega_0);
+  int ifield = pin->GetOrAddInteger("problem","ifield", 1);
   if (MAGNETIC_FIELDS_ENABLED) {
     beta = pin->GetReal("problem","beta");
     H02 *= (1. + 1/beta);
@@ -231,6 +232,12 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
   betaz = pin->GetOrAddInteger("problem","betaz", 0.0);
   if (betaz > 0.0) B0z = std::sqrt(static_cast<Real>(2.0*pres/betaz));
   if (Globals::my_rank==0) std::cout << "B0z=" << B0z << std::endl;
+  
+  // For ifield==8 and 9 set beta to give H02=1 for given sound speed (H02=1,
+  // cs2 = 1/(1+1/beta), but otherwise beta is not used
+  // radial field for ifield ==9
+  betax = pin->GetOrAddInteger("problem","betax", 0.0);
+  if (Globals::my_rank==0 && ifield==9) std::cout << "Starting from radial field w/o vertical equilibrium" << std::endl;
   
 
   // With viscosity and/or resistivity, read eta_Ohm and nu_V
@@ -387,6 +394,15 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
             if (i==ie) pfield->b.x1f(k,j,ie+1) = 0.0;
             if (j==je) pfield->b.x2f(k,je+1,i) = std::sqrt(2.*CUBE(awdth)/PI * (-2.*SQR(iso_cs) + SQR(Omega_0)*(SQR(awdth)+SQR(x3))) /
                                                            SQR(SQR(awdth)+SQR(x3)) );
+            if (k==ke) pfield->b.x3f(ke+1,j,i) = 0.0;
+          }
+          if (ifield == 9) {
+            // net toroidal field with constant \beta with height
+            pfield->b.x1f(k,j,i) = std::sqrt(2.*central_den*std::exp(-x3*x3 / H02)*SQR(iso_cs)/betax);
+            pfield->b.x2f(k,j,i) = 0.0;
+            pfield->b.x3f(k,j,i) = 0.0;
+            if (i==ie) pfield->b.x1f(k,j,ie+1) = std::sqrt(2.*central_den*std::exp(-x3*x3 / H02)*SQR(iso_cs)/betax);
+            if (j==je) pfield->b.x2f(k,je+1,i) = 0.0;
             if (k==ke) pfield->b.x3f(ke+1,j,i) = 0.0;
           }
         } // MHD
