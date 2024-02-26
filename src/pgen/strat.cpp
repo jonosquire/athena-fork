@@ -255,7 +255,7 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
         // Initialize perturbations
         // ipert = 1 - random perturbations to P/d and V
         // [default, used by HGB]
-        if (ipert == 1 && ifield <8) {
+        if (ipert == 1 && ifield != 7) {
           rval = amp*(ran2(&iseed) - 0.5);
           rd = central_den*std::exp(-x3*x3 / H02)*(1.0+2.0*rval);
           if (rd < dfloor) rd = dfloor;
@@ -324,6 +324,8 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
         //  ifield = 5 - uniform By, but only for |z|<2
         //  ifield = 6 - By with constant beta versus z
         //  ifield = 7 - zero field everywhere
+        //  ifield = 8 - low beta generalized Lorentzian
+        //  ifield = 9 - Gaussian in Bx
         if (MAGNETIC_FIELDS_ENABLED) {
           if (ifield == 1) {
             pfield->b.x1f(k,j,i) = 0.0;
@@ -397,7 +399,7 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
             if (k==ke) pfield->b.x3f(ke+1,j,i) = 0.0;
           }
           if (ifield == 9) {
-            // net toroidal field with constant \beta with height
+            // net radial field with constant \beta with height
             pfield->b.x1f(k,j,i) = std::sqrt(2.*central_den*std::exp(-x3*x3 / H02)*SQR(iso_cs)/betax);
             pfield->b.x2f(k,j,i) = 0.0;
             pfield->b.x3f(k,j,i) = 0.0;
