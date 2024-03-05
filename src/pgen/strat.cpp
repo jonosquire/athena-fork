@@ -164,7 +164,7 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
   Real iso_cs=1.0;
   Real B0 = 0.0;
   Real B0z = 0.0; // just for ifield =6
-  Real awdth; // just for ifield = 8. This is width of Lorentzian function 1/(a^2+z^2)
+  Real awdth, npow; // just for ifield = 8. This is width of Lorentzian function 1/(a^2+z^2)
 
   Real SumRd=0.0, SumRvx=0.0, SumRvy=0.0, SumRvz=0.0;
   // TODO(felker): tons of unused variables in this file: xmin, xmax, rbx, rby, Ly, ky,...
@@ -210,6 +210,7 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
   if (MAGNETIC_FIELDS_ENABLED) {
     ifield = pin->GetOrAddInteger("problem","ifield", 1);
     awdth = pin->GetOrAddReal("problem", "awidth", 1.0); // Just for ifield=8.
+    npow = pin->GetOrAddReal("problem", "npow", 2.0); // Just for ifield=8. powerlaw index of density
   }
   
 
@@ -233,6 +234,8 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
   if (betaz > 0.0) B0z = std::sqrt(static_cast<Real>(2.0*pres/betaz));
   if (Globals::my_rank==0) std::cout << "B0z=" << B0z << std::endl;
   
+  
+  
   // For ifield==8 and 9 set beta to give H02=1 for given sound speed (H02=1,
   // cs2 = 1/(1+1/beta), but otherwise beta is not used
   // radial field for ifield ==9
@@ -255,7 +258,7 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
         // Initialize perturbations
         // ipert = 1 - random perturbations to P/d and V
         // [default, used by HGB]
-        if (ipert == 1 && ifield != 7) {
+        if (ipert == 1 && ifield != 8) {
           rval = amp*(ran2(&iseed) - 0.5);
           rd = central_den*std::exp(-x3*x3 / H02)*(1.0+2.0*rval);
           if (rd < dfloor) rd = dfloor;
@@ -278,7 +281,7 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
           // no perturbations
         } else if (ifield == 8) {
           rval = amp*(ran2(&iseed) - 0.5);
-          rd = 2.*CUBE(awdth)/PI/SQR(SQR(awdth) + SQR(x3))*(1.0+2.0*rval); // Could generalize to other power laws
+          rd = 2.*std::pow(awdth,npow-1)/PI/std::pow(SQR(awdth) + SQR(x3),npow/2.)*(1.0+2.0*rval); // Could generalize to other power laws
           if (rd < dfloor) rd = dfloor;
           SumRd += rd;
           
@@ -390,21 +393,21 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
           if (ifield == 8) {
             // Lorenzian power-law like solution
             pfield->b.x1f(k,j,i) = 0.0;
-            pfield->b.x2f(k,j,i) = std::sqrt(2.*CUBE(awdth)/PI * (-2.*SQR(iso_cs) + SQR(Omega_0)*(SQR(awdth)+SQR(x3))) /
-                                             SQR(SQR(awdth)+SQR(x3)) ); // See ParkerModeStability.nb
+            pfield->b.x2f(k,j,i) = std::sqrt(4.*std::pow(awdth,npow-1.)/(PI*(npow-2.)) * (-(npow-2.)*SQR(iso_cs) + SQR(Omega_0)*(SQR(awdth)+SQR(x3))) /
+                                             std::pow(SQR(awdth)+SQR(x3), npow/2.) ); // See ParkerModeStability.nb
             pfield->b.x3f(k,j,i) = 0.0;
             if (i==ie) pfield->b.x1f(k,j,ie+1) = 0.0;
-            if (j==je) pfield->b.x2f(k,je+1,i) = std::sqrt(2.*CUBE(awdth)/PI * (-2.*SQR(iso_cs) + SQR(Omega_0)*(SQR(awdth)+SQR(x3))) /
-                                                           SQR(SQR(awdth)+SQR(x3)) );
+            if (j==je) pfield->b.x2f(k,je+1,i) = std::sqrt(4.*std::pow(awdth,npow-1.)/(PI*(npow-2.)) * (-(npow-2.)*SQR(iso_cs) + SQR(Omega_0)*(SQR(awdth)+SQR(x3))) /
+                                                           std::pow(SQR(awdth)+SQR(x3), npow/2.) );
             if (k==ke) pfield->b.x3f(ke+1,j,i) = 0.0;
           }
           if (ifield == 9) {
             // net radial field with constant \beta with height
             pfield->b.x1f(k,j,i) = std::sqrt(2.*central_den*std::exp(-x3*x3 / H02)*SQR(iso_cs)/betax);
-            pfield->b.x2f(k,j,i) = 0.0;
+            pfield->b.x2f(k,j,i) = std::sqrt(2.*central_den*std::exp(-x3*x3 / H02)*SQR(iso_cs)/beta);
             pfield->b.x3f(k,j,i) = 0.0;
             if (i==ie) pfield->b.x1f(k,j,ie+1) = std::sqrt(2.*central_den*std::exp(-x3*x3 / H02)*SQR(iso_cs)/betax);
-            if (j==je) pfield->b.x2f(k,je+1,i) = 0.0;
+            if (j==je) pfield->b.x2f(k,je+1,i) = std::sqrt(2.*central_den*std::exp(-x3*x3 / H02)*SQR(iso_cs)/beta);
             if (k==ke) pfield->b.x3f(ke+1,j,i) = 0.0;
           }
         } // MHD

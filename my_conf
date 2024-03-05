@@ -1,1 +1,1 @@
-python configure.py --prob=strat -b -mpi -hdf5 --nghost=4 --cxx=clang++ --eos=isothermal --flux=hlle --hdf5_path=/opt/homebrew
+python configure.py --prob=strat -b -mpi -hdf5 --nghost=2 --cxx=clang++ --eos=isothermal --flux=hlle --hdf5_path=/opt/homebrew
