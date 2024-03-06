@@ -142,12 +142,12 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
 //    EnrollUserBoundaryFunction(BoundaryFace::outer_x3, StratSimon13OuterX3);
   }
 
-  if (!shear_periodic) {
-    std::stringstream msg;
-    msg << "### FATAL ERROR in hb3.cpp ProblemGenerator" << std::endl
-        << "This problem generator requires shearing box." << std::endl;
-    ATHENA_ERROR(msg);
-  }
+//  if (!shear_periodic) {
+//    std::stringstream msg;
+//    msg << "### FATAL ERROR in hb3.cpp ProblemGenerator" << std::endl
+//        << "This problem generator requires shearing box." << std::endl;
+//    ATHENA_ERROR(msg);
+//  }
 
   return;
 }
