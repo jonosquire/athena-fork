@@ -120,10 +120,12 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   dfloor=pin->GetOrAddReal("hydro","dfloor",(1024*(float_min)));
   pfloor=pin->GetOrAddReal("hydro","pfloor",(1024*(float_min)));
 
-  AllocateUserHistoryOutput(2);
-  EnrollUserHistoryOutput(0, HistoryBxBy, "-BxBy");
-  EnrollUserHistoryOutput(1, HistorydVxVy, "dVxVy");
-
+  if (MAGNETIC_FIELDS_ENABLED) {
+    AllocateUserHistoryOutput(2);
+    EnrollUserHistoryOutput(0, HistoryBxBy, "-BxBy");
+    EnrollUserHistoryOutput(1, HistorydVxVy, "dVxVy");
+  }
+    
   // Enroll user-defined physical source terms
   //   vertical external gravitational potential
   EnrollUserExplicitSourceFunction(VertGrav);
@@ -207,11 +209,11 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
   ipert = pin->GetOrAddInteger("problem","ipert", 1);
 
 
-  if (MAGNETIC_FIELDS_ENABLED) {
-    ifield = pin->GetOrAddInteger("problem","ifield", 1);
-    awdth = pin->GetOrAddReal("problem", "awidth", 1.0); // Just for ifield=8.
-    npow = pin->GetOrAddReal("problem", "npow", 2.0); // Just for ifield=8. powerlaw index of density
-  }
+  
+  ifield = pin->GetOrAddInteger("problem","ifield", 1);
+  awdth = pin->GetOrAddReal("problem", "awidth", 1.0); // Just for ifield=8.
+  npow = pin->GetOrAddReal("problem", "npow", 2.0); // Just for ifield=8. powerlaw index of density
+  
   
 
   // Compute pressure based on the EOS.
