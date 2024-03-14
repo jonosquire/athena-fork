@@ -156,15 +156,23 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
 void MeshBlock::ProblemGenerator(ParameterInput *pin) {
   // Determine locations of initial values
   std::string input_filename = pin->GetString("problem", "input_filename");
-  std::string dataset_cons = pin->GetString("problem", "dataset_cons");
-  int index_dens = pin->GetInteger("problem", "index_dens");
-  int index_mom1 = pin->GetInteger("problem", "index_mom1");
-  int index_mom2 = pin->GetInteger("problem", "index_mom2");
-  int index_mom3 = pin->GetInteger("problem", "index_mom3");
-  int index_etot = pin->GetInteger("problem", "index_etot");
-  std::string dataset_b1 = pin->GetString("problem", "dataset_b1");
-  std::string dataset_b2 = pin->GetString("problem", "dataset_b2");
-  std::string dataset_b3 = pin->GetString("problem", "dataset_b3");
+  std::string dataset_cons = pin->GetOrAddString("problem", "dataset_cons","cons");
+  int index_dens = pin->GetOrAddInteger("problem", "index_dens",0);
+  int index_mom1 = pin->GetOrAddInteger("problem", "index_mom1",1);
+  int index_mom2 = pin->GetOrAddInteger("problem", "index_mom2",2);
+  int index_mom3 = pin->GetOrAddInteger("problem", "index_mom3",3);
+  int index_etot = pin->GetOrAddInteger("problem", "index_etot",4);
+  std::string dataset_b1 = pin->GetOrAddString("problem", "dataset_b1","bf1");
+  std::string dataset_b2 = pin->GetOrAddString("problem", "dataset_b2","bf2");
+  std::string dataset_b3 = pin->GetOrAddString("problem", "dataset_b3","bf3");
+  
+  
+  
+  if (gid == 0) {
+    std::cout << "\n<<<<<<<<<<<>>>>>>>>>>>>>\n";
+    std::cout << "Reading in data from " << input_filename;
+    std::cout << "\n<<<<<<<<<<<>>>>>>>>>>>>>\n";
+  }
 
   // Set conserved array selections
   int start_cons_file[5];
