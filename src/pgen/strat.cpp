@@ -85,6 +85,14 @@ void StratLesurOuterX3(MeshBlock *pmb, Coordinates *pco,
                        AthenaArray<Real> &prim, FaceField &b,
                        Real time, Real dt,
                        int il, int iu, int jl, int ju, int kl, int ku, int ngh);
+void StratPowerLawInnerX3(MeshBlock *pmb, Coordinates *pco,
+                       AthenaArray<Real> &prim, FaceField &b,
+                       Real time, Real dt,
+                       int il, int iu, int jl, int ju, int kl, int ku, int ngh);
+void StratPowerLawOuterX3(MeshBlock *pmb, Coordinates *pco,
+                       AthenaArray<Real> &prim, FaceField &b,
+                       Real time, Real dt,
+                       int il, int iu, int jl, int ju, int kl, int ku, int ngh);
 
 namespace {
 Real HistoryBxBy(MeshBlock *pmb, int iout);
@@ -92,7 +100,7 @@ Real HistorydVxVy(MeshBlock *pmb, int iout);
 
 // Apply a density floor - useful for large |z| regions
 Real dfloor, pfloor;
-Real Omega_0, qshear, H02, beta, central_den, betaz, betax;
+Real Omega_0, qshear, H02, beta, central_den, betaz, betax, bc_pl_index;
 } // namespace
 
 //====================================================================================
@@ -119,6 +127,9 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   Real float_min = std::numeric_limits<float>::min();
   dfloor=pin->GetOrAddReal("hydro","dfloor",(1024*(float_min)));
   pfloor=pin->GetOrAddReal("hydro","pfloor",(1024*(float_min)));
+  
+  // power law index for density boundary. Magnetic field one is (bc_pl_index-2)/2 for a low-beta equilibrium
+  bc_pl_index = pin->GetOrAddReal("problem", "dens_boundary_powerlaw", 5.);
 
   if (MAGNETIC_FIELDS_ENABLED) {
     AllocateUserHistoryOutput(2);
@@ -132,16 +143,19 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
 
   // enroll user-defined boundary conditions
   if (mesh_bcs[BoundaryFace::inner_x3] == GetBoundaryFlag("user")) {
-    EnrollUserBoundaryFunction(BoundaryFace::inner_x3, StratOutflowInnerX3);
+//    EnrollUserBoundaryFunction(BoundaryFace::inner_x3, StratOutflowInnerX3);
 //    EnrollUserBoundaryFunction(BoundaryFace::inner_x3, StratLesurInnerX3);
 //    if (Globals::my_rank==0) std::cout << "Warning: using Lesur boundary conditions\n";
 //    EnrollUserBoundaryFunction(BoundaryFace::inner_x3, StratSimon13InnerX3);
 //        if (Globals::my_rank==0) std::cout << "Warning: using Simon13 boundary conditions\n";
+    EnrollUserBoundaryFunction(BoundaryFace::inner_x3, StratPowerLawInnerX3);
+            if (Globals::my_rank==0) std::cout << "Warning: using PowerLaw boundary conditions with index -" << bc_pl_index <<"\n";
   }
   if (mesh_bcs[BoundaryFace::outer_x3] == GetBoundaryFlag("user")) {
-    EnrollUserBoundaryFunction(BoundaryFace::outer_x3, StratOutflowOuterX3);
+//    EnrollUserBoundaryFunction(BoundaryFace::outer_x3, StratOutflowOuterX3);
 //    EnrollUserBoundaryFunction(BoundaryFace::outer_x3, StratLesurOuterX3);
 //    EnrollUserBoundaryFunction(BoundaryFace::outer_x3, StratSimon13OuterX3);
+    EnrollUserBoundaryFunction(BoundaryFace::outer_x3, StratPowerLawOuterX3);
   }
 
 //  if (!shear_periodic) {
@@ -925,6 +939,142 @@ void StratLesurOuterX3(MeshBlock *pmb, Coordinates *pco,
   }
   return;
 }
+
+
+//  Here is the lower z outflow boundary.
+//  These are the modified ones from Simon13, where Bx and By
+//  are extrapolated like rho
+// ONLY WORKS FOR ISOTHERMAL
+
+void StratPowerLawInnerX3(MeshBlock *pmb, Coordinates *pco,
+                         AthenaArray<Real> &prim, FaceField &b,
+                         Real time, Real dt,
+                         int il, int iu, int jl, int ju, int kl, int ku, int ngh) {
+  // At low beta, magnetic pressure ~z^-b if density ~z^(-b-2)
+  Real bplind = 0.5*(bc_pl_index-2.);
+  // Extrapolate field from last physical zones
+  if (MAGNETIC_FIELDS_ENABLED) {
+    for (int k=1; k<=ngh; k++) {
+      for (int j=jl; j<=ju; j++) {
+        for (int i=il; i<=iu+1; i++) {
+          Real x3 = pco->x3v(kl-k);
+          Real x3b = pco->x3v(kl);
+          b.x1f(kl-k,j,i) = b.x1f(kl,j,i) * pow(x3b/x3, bplind);
+        }
+      }
+    }
+    for (int k=1; k<=ngh; k++) {
+      for (int j=jl; j<=ju+1; j++) {
+        for (int i=il; i<=iu; i++) {
+          Real x3 = pco->x3v(kl-k);
+          Real x3b = pco->x3v(kl);
+          b.x2f(kl-k,j,i) = b.x2f(kl,j,i) * pow(x3b/x3, bplind);
+        }
+      }
+    }
+    for (int k=1; k<=ngh; k++) {
+      for (int j=jl; j<=ju; j++) {
+        for (int i=il; i<=iu; i++) {
+          b.x3f(kl-k,j,i) = b.x3f(kl,j,i);
+        }
+      }
+    }
+  } // MHD
+
+  for (int k=1; k<=ngh; k++) {
+    for (int j=jl; j<=ju; j++) {
+      for (int i=il; i<=iu; i++) {
+        Real x3 = pco->x3v(kl-k);
+        Real x3b = pco->x3v(kl);
+        Real den = prim(IDN,kl,j,i);
+        // First calculate the effective gas temperature (Tkl=cs^2)
+        // in the last physical zone. If isothermal, use H=1
+        // Now extrapolate the density to balance gravity
+        // assuming a constant temperature in the ghost zones
+        prim(IDN,kl-k,j,i) = den * pow(x3b/x3, bc_pl_index);
+        // Copy the velocities, but not the momenta ---
+        // important because of the density extrapolation above
+        prim(IVX,kl-k,j,i) = prim(IVX,kl,j,i);
+        prim(IVY,kl-k,j,i) = prim(IVY,kl,j,i);
+        // If there's inflow into the grid, set the normal velocity to zero
+        if (prim(IVZ,kl,j,i) >= 0.0) {
+          prim(IVZ,kl-k,j,i) = 0.0;
+        } else {
+          prim(IVZ,kl-k,j,i) = prim(IVZ,kl,j,i);
+        }
+      }
+    }
+  }
+  return;
+}
+
+
+//  Here is the lower z outflow boundary.
+//  These are the modified ones from Simon13, where Bx and By
+//  are extrapolated like rho
+// ONLY WORKS FOR ISOTHERMAL
+void StratPowerLawOuterX3(MeshBlock *pmb, Coordinates *pco,
+                         AthenaArray<Real> &prim,
+                         FaceField &b, Real time, Real dt,
+                         int il, int iu, int jl, int ju, int kl, int ku, int ngh) {
+  // At low beta, magnetic pressure ~z^-b if density ~z^(-b-2)
+  Real bplind = 0.5*(bc_pl_index-2.);
+  // Extrapolate field from last physical zones
+  if (MAGNETIC_FIELDS_ENABLED) {
+    for (int k=1; k<=ngh; k++) {
+      for (int j=jl; j<=ju; j++) {
+        for (int i=il; i<=iu+1; i++) {
+          Real x3 = pco->x3v(ku+k);
+          Real x3b = pco->x3v(ku);
+          b.x1f(ku+k,j,i) = b.x1f(ku,j,i) * pow(x3b/x3, bplind);
+        }
+      }
+    }
+    for (int k=1; k<=ngh; k++) {
+      for (int j=jl; j<=ju+1; j++) {
+        for (int i=il; i<=iu; i++) {
+          Real x3 = pco->x3v(ku+k);
+          Real x3b = pco->x3v(ku);
+          b.x2f(ku+k,j,i) = b.x2f(ku,j,i) * pow(x3b/x3, bplind);
+        }
+      }
+    }
+    for (int k=1; k<=ngh; k++) {
+      for (int j=jl; j<=ju; j++) {
+        for (int i=il; i<=iu; i++) {
+          b.x3f(ku+1+k,j,i) = b.x3f(ku+1,j,i);
+        }
+      }
+    }
+  } // MHD
+
+  for (int k=1; k<=ngh; k++) {
+    for (int j=jl; j<=ju; j++) {
+      for (int i=il; i<=iu; i++) {
+        Real x3 = pco->x3v(ku+k);
+        Real x3b = pco->x3v(ku);
+        Real den = prim(IDN,ku,j,i);
+        // First calculate the effective gas temperature (Tku=cs^2)
+        // in the last physical zone. If isothermal, use H=1
+        // Now extrapolate the density to balance gravity
+        // assuming a constant temperature in the ghost zones
+        prim(IDN,ku+k,j,i) = den * pow(x3b/x3, bc_pl_index);
+        // Copy the velocities, but not the momenta ---
+        // important because of the density extrapolation above
+        prim(IVX,ku+k,j,i) = prim(IVX,ku,j,i);
+        prim(IVY,ku+k,j,i) = prim(IVY,ku,j,i);
+        // If there's inflow into the grid, set the normal velocity to zero
+        if (prim(IVZ,ku,j,i) <= 0.0) {
+          prim(IVZ,ku+k,j,i) = 0.0;
+        } else {
+          prim(IVZ,ku+k,j,i) = prim(IVZ,ku,j,i);
+        }
+      }
+    }
+  }
+  return;
+}
+
 
 
 
