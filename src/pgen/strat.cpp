@@ -411,20 +411,20 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
             pfield->b.x1f(k,j,i) = 0.0;
             pfield->b.x2f(k,j,i) = std::sqrt(4.*std::pow(awdth,npow-1.)/(PI*(npow-2.)) * (-(npow-2.)*SQR(iso_cs) + SQR(Omega_0)*(SQR(awdth)+SQR(x3))) /
                                              std::pow(SQR(awdth)+SQR(x3), npow/2.) ); // See ParkerModeStability.nb
-            pfield->b.x3f(k,j,i) = 0.0;
+            pfield->b.x3f(k,j,i) = B0z;
             if (i==ie) pfield->b.x1f(k,j,ie+1) = 0.0;
             if (j==je) pfield->b.x2f(k,je+1,i) = std::sqrt(4.*std::pow(awdth,npow-1.)/(PI*(npow-2.)) * (-(npow-2.)*SQR(iso_cs) + SQR(Omega_0)*(SQR(awdth)+SQR(x3))) /
                                                            std::pow(SQR(awdth)+SQR(x3), npow/2.) );
-            if (k==ke) pfield->b.x3f(ke+1,j,i) = 0.0;
+            if (k==ke) pfield->b.x3f(ke+1,j,i) = B0z;
           }
           if (ifield == 9) {
             // net radial field with constant \beta with height
             pfield->b.x1f(k,j,i) = -std::sqrt(2.*central_den*std::exp(-x3*x3 / H02)*SQR(iso_cs)/betax);
             pfield->b.x2f(k,j,i) = std::sqrt(2.*central_den*std::exp(-x3*x3 / H02)*SQR(iso_cs)/beta);
-            pfield->b.x3f(k,j,i) = 0.0;
+            pfield->b.x3f(k,j,i) = B0z;
             if (i==ie) pfield->b.x1f(k,j,ie+1) = -std::sqrt(2.*central_den*std::exp(-x3*x3 / H02)*SQR(iso_cs)/betax);
             if (j==je) pfield->b.x2f(k,je+1,i) = std::sqrt(2.*central_den*std::exp(-x3*x3 / H02)*SQR(iso_cs)/beta);
-            if (k==ke) pfield->b.x3f(ke+1,j,i) = 0.0;
+            if (k==ke) pfield->b.x3f(ke+1,j,i) = B0z;
           }
         } // MHD
       }
