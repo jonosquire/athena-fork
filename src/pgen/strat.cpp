@@ -258,6 +258,7 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
   // radial field for ifield ==9
   betax = pin->GetOrAddInteger("problem","betax", 0.0);
   if (Globals::my_rank==0 && ifield==9) std::cout << "Starting from radial field w/o vertical equilibrium" << std::endl;
+  Real signbx = (betax>=0.0)? 1 : -1; // +1 to have the sign to amplitufy By
   
 
   // With viscosity and/or resistivity, read eta_Ohm and nu_V
@@ -420,10 +421,10 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
           }
           if (ifield == 9) {
             // net radial field with constant \beta with height
-            pfield->b.x1f(k,j,i) = -std::sqrt(2.*central_den*std::exp(-x3*x3 / H02)*SQR(iso_cs)/betax);
+            pfield->b.x1f(k,j,i) = -signbx * std::sqrt(2.*central_den*std::exp(-x3*x3 / H02)*SQR(iso_cs)/betax);
             pfield->b.x2f(k,j,i) = std::sqrt(2.*central_den*std::exp(-x3*x3 / H02)*SQR(iso_cs)/beta);
             pfield->b.x3f(k,j,i) = B0z;
-            if (i==ie) pfield->b.x1f(k,j,ie+1) = -std::sqrt(2.*central_den*std::exp(-x3*x3 / H02)*SQR(iso_cs)/betax);
+            if (i==ie) pfield->b.x1f(k,j,ie+1) = -signbx * std::sqrt(2.*central_den*std::exp(-x3*x3 / H02)*SQR(iso_cs)/betax);
             if (j==je) pfield->b.x2f(k,je+1,i) = std::sqrt(2.*central_den*std::exp(-x3*x3 / H02)*SQR(iso_cs)/beta);
             if (k==ke) pfield->b.x3f(ke+1,j,i) = B0z;
           }
