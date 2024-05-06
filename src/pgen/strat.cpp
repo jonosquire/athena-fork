@@ -143,19 +143,19 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
 
   // enroll user-defined boundary conditions
   if (mesh_bcs[BoundaryFace::inner_x3] == GetBoundaryFlag("user")) {
-//    EnrollUserBoundaryFunction(BoundaryFace::inner_x3, StratOutflowInnerX3);
+    EnrollUserBoundaryFunction(BoundaryFace::inner_x3, StratOutflowInnerX3);
 //    EnrollUserBoundaryFunction(BoundaryFace::inner_x3, StratLesurInnerX3);
 //    if (Globals::my_rank==0) std::cout << "Warning: using Lesur boundary conditions\n";
 //    EnrollUserBoundaryFunction(BoundaryFace::inner_x3, StratSimon13InnerX3);
 //        if (Globals::my_rank==0) std::cout << "Warning: using Simon13 boundary conditions\n";
-    EnrollUserBoundaryFunction(BoundaryFace::inner_x3, StratPowerLawInnerX3);
-            if (Globals::my_rank==0) std::cout << "Warning: using PowerLaw boundary conditions with index -" << bc_pl_index <<"\n";
+//    EnrollUserBoundaryFunction(BoundaryFace::inner_x3, StratPowerLawInnerX3);
+//            if (Globals::my_rank==0) std::cout << "Warning: using PowerLaw boundary conditions with index -" << bc_pl_index <<"\n";
   }
   if (mesh_bcs[BoundaryFace::outer_x3] == GetBoundaryFlag("user")) {
-//    EnrollUserBoundaryFunction(BoundaryFace::outer_x3, StratOutflowOuterX3);
+    EnrollUserBoundaryFunction(BoundaryFace::outer_x3, StratOutflowOuterX3);
 //    EnrollUserBoundaryFunction(BoundaryFace::outer_x3, StratLesurOuterX3);
 //    EnrollUserBoundaryFunction(BoundaryFace::outer_x3, StratSimon13OuterX3);
-    EnrollUserBoundaryFunction(BoundaryFace::outer_x3, StratPowerLawOuterX3);
+//    EnrollUserBoundaryFunction(BoundaryFace::outer_x3, StratPowerLawOuterX3);
   }
 
 //  if (!shear_periodic) {
