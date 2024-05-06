@@ -257,9 +257,9 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
   // cs2 = 1/(1+1/beta), but otherwise beta is not used
   // radial field for ifield ==9
   betax = pin->GetOrAddInteger("problem","betax", 0.0);
-  if (Globals::my_rank==0 && ifield==9) std::cout << "Starting from radial field w/o vertical equilibrium" << std::endl;
   Real signbx = (betax>=0.0)? 1 : -1; // +1 to have the sign to amplitufy By
-  
+  betax = fabs(betax);
+  if (Globals::my_rank==0 && ifield==9) std::cout << "Starting from radial field: betax=" <<betax << " with sign " << signbx  << std::endl;
 
   // With viscosity and/or resistivity, read eta_Ohm and nu_V
   // (to be filled in) ???
