@@ -176,10 +176,11 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
 #ifndef FFT
     std::stringstream msg;
     msg << "### FATAL ERROR in TurbulenceDriver::TurbulenceDriver" << std::endl
-        << "non zero Turbulence flag is set without FFT!" << std::endl;
+    << "non zero Turbulence flag is set without FFT!" << std::endl;
     ATHENA_ERROR(msg);
     return;
 #endif
+  }
 
   return;
 }
