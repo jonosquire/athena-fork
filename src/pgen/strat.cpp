@@ -164,6 +164,21 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
 //        << "This problem generator requires shearing box." << std::endl;
 //    ATHENA_ERROR(msg);
 //  }
+  
+  // turb_flag is initialzed in the Mesh constructor to 0 by default;
+  // turb_flag = 1 for decaying turbulence
+  // turb_flag = 2 for impulsively driven turbulence
+  // turb_flag = 3 for continuously driven turbulence
+  turb_flag = pin->GetInteger("problem","turb_flag");
+  if (turb_flag != 0) {
+    if (Globals::my_rank==0) std::cout << "Including turbulent forcing with parameters from the <turbulence> block\n";
+#ifndef FFT
+    std::stringstream msg;
+    msg << "### FATAL ERROR in TurbulenceDriver::TurbulenceDriver" << std::endl
+        << "non zero Turbulence flag is set without FFT!" << std::endl;
+    ATHENA_ERROR(msg);
+    return;
+#endif
 
   return;
 }
