@@ -100,8 +100,9 @@ Real HistoryBxBy(MeshBlock *pmb, int iout);
 Real HistorydVxVy(MeshBlock *pmb, int iout);
 
 // Apply a density floor - useful for large |z| regions
-Real dfloor, pfloor;
+Real dfloor, pfloor, sumrho;
 Real Omega_0, qshear, H02, beta, central_den, betaz, betax, bc_pl_index;
+bool replensish_density;
 } // namespace
 
 //====================================================================================
@@ -128,6 +129,8 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   Real float_min = std::numeric_limits<float>::min();
   dfloor=pin->GetOrAddReal("hydro","dfloor",(1024*(float_min)));
   pfloor=pin->GetOrAddReal("hydro","pfloor",(1024*(float_min)));
+  
+  replensish_density = pin->GetOrAddBoolean("problem", "replensish_density", false);
   
   // power law index for density boundary. Magnetic field one is (bc_pl_index-2)/2 for a low-beta equilibrium
   bc_pl_index = pin->GetOrAddReal("problem", "dens_boundary_powerlaw", 5.);
@@ -479,6 +482,25 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
       }
     }
   }
+  
+  // Compute total density to use in loop
+  // (Seems like this shoudld have a sum over meshblocks... May not work with many blocks per proc)
+  sumrho = 0.0;
+  for (int k=ks; k<=ke; k++) {
+    for (int j=js; j<=je; j++) {
+      for (int i=is; i<=ie; i++) {
+        sumrho += phydro->u(IDN,k,j,i);
+  }}}
+  if (lid == pmy_mesh->nblocal - 1) {
+#ifdef MPI_PARALLEL
+      MPI_Allreduce(MPI_IN_PLACE, &sumrho,  1, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+#endif
+  }
+  std::int64_t cell_num = pmy_mesh->GetTotalCells();
+  if (replensish_density && Globals::my_rank==0)
+    std::cout << "Replishing total mass at each time step. Initial average density = " << sumrho/cell_num <<"\n";
+
+  
   return;
 }
 
@@ -507,6 +529,31 @@ void MeshBlock::UserWorkInLoop() {
         }
       }
     }
+  }
+  
+  if (replensish_density) {
+    Real curr_rho = 0.0;
+    for (int k=ks; k<=ke; k++) {
+      for (int j=js; j<=je; j++) {
+        for (int i=is; i<=ie; i++) {
+          curr_rho += phydro->u(IDN,k,j,i);
+    }}}
+    if (lid == pmy_mesh->nblocal - 1) {
+#ifdef MPI_PARALLEL
+      MPI_Allreduce(MPI_IN_PLACE, &curr_rho,  1, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+#endif
+    }
+    for (int b = 0; b < pmy_mesh->nblocal; ++b) {
+      Hydro *ph = pmy_mesh->my_blocks(b)->phydro;
+      for (int k=ks; k<=ke; k++) {
+        for (int j=js; j<=je; j++) {
+          for (int i=is; i<=ie; i++) {
+            ph->u(IDN,k,j,i) *= sumrho / curr_rho;
+    }}}}
+    
+    if (Globals::my_rank==0)
+      std::cout << "Mass was " << curr_rho <<", replenished to " << sumrho << "\n";
+    
   }
   return;
 }
