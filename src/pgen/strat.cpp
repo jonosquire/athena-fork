@@ -173,7 +173,7 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   // turb_flag = 1 for decaying turbulence
   // turb_flag = 2 for impulsively driven turbulence
   // turb_flag = 3 for continuously driven turbulence
-  turb_flag = pin->GetInteger("problem","turb_flag");
+  turb_flag = pin->GetOrAddInteger("problem","turb_flag",0);
   if (turb_flag != 0) {
     if (Globals::my_rank==0) std::cout << "Including turbulent forcing with parameters from the <turbulence> block\n";
 #ifndef FFT
@@ -184,7 +184,16 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
     return;
 #endif
   }
-
+  
+  
+  // Value of sumrho to use. Only needed in a restart because it doesn't run ProblemGenerator
+  // have to take from previous output file (this is super hacky...)
+  Real replensish_density_val = pin->GetOrAddReal("problem", "replensish_density_val", 0.0);
+  if (replensish_density>0.) {
+    sumrho = replensish_density_val;
+    if (Globals::my_rank==0)
+      std::cout << "Replenishing total mass at each time step. Initial sumrho = " << sumrho <<"\n";
+  }
   return;
 }
 
@@ -498,7 +507,7 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
   }
   std::int64_t cell_num = pmy_mesh->GetTotalCells();
   if (replensish_density && Globals::my_rank==0)
-    std::cout << "Replishing total mass at each time step. Initial average density = " << sumrho/cell_num <<"\n";
+    std::cout << "Replenishing total mass at each time step. Initial average density = " << sumrho/cell_num <<"\n";
 
   
   return;
