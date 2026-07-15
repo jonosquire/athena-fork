@@ -1,0 +1,1 @@
+python configure.py --prob=from_array -b -mpi -hdf5 --nghost=4 --cxx=clang++ --eos=adiabatic --flux=hlld --fftw_path=/usr/local
