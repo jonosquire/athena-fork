@@ -37,12 +37,13 @@ void DoolittleLUPSolve(Real **lu, int *pivot, Real *b, int n, Real *x);
 //!constructor
 
 Reconstruction::Reconstruction(MeshBlock *pmb, ParameterInput *pin) :
-    characteristic_projection{false}, uniform{true, true, true},
-    curvilinear{false, false},
-    // read fourth-order solver switches
-    correct_ic{pin->GetOrAddBoolean("time", "correct_ic", false)},
-    correct_err{pin->GetOrAddBoolean("time", "correct_err", false)}, pmy_block_{pmb}
-{
+    pmy_block_(pmb), characteristic_projection_(false),
+    minmod_(false), rec3m_(REC3METHOD::PPM),
+    floor_ppm_fast_{pin->GetOrAddBoolean("time", "floor_ppm_fast", false)},
+    extremum_preserving_{pin->GetOrAddBoolean("time", "ext_preserving", true)},
+    uniform_{true, true, true}, curvilinear_{false, false},
+    correct_ic_{pin->GetOrAddBoolean("time", "correct_ic", false)},
+    correct_err_{pin->GetOrAddBoolean("time", "correct_err", false)} {
   // Read and set type of spatial reconstruction
   // --------------------------------
   std::string input_recon = pin->GetOrAddString("time", "xorder", "2");
@@ -54,19 +55,37 @@ Reconstruction::Reconstruction(MeshBlock *pmb, ParameterInput *pin) :
     xorder = 2;
   } else if (input_recon == "2c") {
     xorder = 2;
-    characteristic_projection = true;
+    characteristic_projection_ = true;
+  } else if (input_recon == "2m") {
+    xorder = 2;
+    minmod_ = true;
+  } else if (input_recon == "2cm" || input_recon == "2mc") {
+    xorder = 2;
+    minmod_ = true;
+    characteristic_projection_ = true;
   } else if (input_recon == "3") {
     // PPM approximates interfaces with 4th-order accurate stencils, but use xorder=3
     // to denote that the overall scheme is "between 2nd and 4th" order w/o flux terms
     xorder = 3;
   } else if (input_recon == "3c") {
     xorder = 3;
-    characteristic_projection = true;
+    characteristic_projection_ = true;
+  } else if (input_recon == "3f") {
+    xorder = 3;
+    rec3m_ = REC3METHOD::PPMF;
+  } else if (input_recon == "wenoz") {
+    // Technically WENO-Z class solvers can achieve 5th order, but here we use xorder=3
+    // because their stencil requirement is same as PPM.
+    xorder = 3;
+    rec3m_ = REC3METHOD::WENOZ;
+  } else if (input_recon == "wenomz") {
+    xorder = 3;
+    rec3m_ = REC3METHOD::WENOMZ;
   } else if ((input_recon == "4") || (input_recon == "4c")) {
     // Full 4th-order scheme for hydro or MHD on uniform Cartesian grids
     xorder = 4;
     if (input_recon == "4c")
-      characteristic_projection = true;
+      characteristic_projection_ = true;
     if (MAGNETIC_FIELDS_ENABLED) {
       std::stringstream msg;
       msg << "### FATAL ERROR in Reconstruction constructor" << std::endl
@@ -82,7 +101,7 @@ Reconstruction::Reconstruction(MeshBlock *pmb, ParameterInput *pin) :
   }
   // Check for incompatible choices with broader solver configuration
   // --------------------------------
-  if (GENERAL_EOS && characteristic_projection) {
+  if (GENERAL_EOS && characteristic_projection_) {
     std::stringstream msg;
     msg << "### FATAL ERROR in Reconstruction constructor" << std::endl
         << "General EOS does not support characteristic reconstruction."<< std::endl;
@@ -127,9 +146,9 @@ Reconstruction::Reconstruction(MeshBlock *pmb, ParameterInput *pin) :
             << "x3rat= " << pmb->block_size.x3rat << std::endl;
         ATHENA_ERROR(msg);
       }
-      Real& dx_i   = pmb->pcoord->dx1f(pmb->is);
-      Real& dx_j   = pmb->pcoord->dx2f(pmb->js);
-      Real& dx_k   = pmb->pcoord->dx3f(pmb->ks);
+      const Real& dx_i   = pmb->pcoord->dx1f(pmb->is);
+      const Real& dx_j   = pmb->pcoord->dx2f(pmb->js);
+      const Real& dx_k   = pmb->pcoord->dx3f(pmb->ks);
       // Note, probably want to make the following condition less strict (signal warning
       // for small differences due to floating-point issues) but upgrade to error for
       // large deviations from a square mesh. Currently signals a warning for each
@@ -204,21 +223,32 @@ Reconstruction::Reconstruction(MeshBlock *pmb, ParameterInput *pin) :
   // switch to secondary PLM and PPM variants for nonuniform and/or curvilinear meshes
   if (std::strcmp(COORDINATE_SYSTEM, "cylindrical") == 0) {
     // cylindrical: x1=r requires special treatment. x2=phi, x3=z do not.
-    curvilinear[X1DIR] = true;
+    curvilinear_[X1DIR] = true;
   }
   if (std::strcmp(COORDINATE_SYSTEM, "spherical_polar") == 0) {
     // spherical_polar: x1=r and x2=theta require special treatment. x3=phi does not
-    curvilinear[X1DIR] = true;
-    curvilinear[X2DIR] = true;
+    curvilinear_[X1DIR] = true;
+    curvilinear_[X2DIR] = true;
   }
   // for all coordinate systems, nonuniform geometric spacing or user-defined
   // MeshGenerator ---> use nonuniform reconstruction weights and limiter terms
   if (pmb->block_size.x1rat != 1.0)
-    uniform[X1DIR] = false;
+    uniform_[X1DIR] = false;
   if (pmb->block_size.x2rat != 1.0)
-    uniform[X2DIR] = false;
+    uniform_[X2DIR] = false;
   if (pmb->block_size.x3rat != 1.0)
-    uniform[X3DIR] = false;
+    uniform_[X3DIR] = false;
+
+  // check coordinate compatibility with WENO
+  if (rec3m_ == REC3METHOD::WENOZ || rec3m_ == REC3METHOD::WENOMZ) {
+    if (!uniform_[X1DIR] || !uniform_[X2DIR] || !uniform_[X3DIR]
+      || curvilinear_[X1DIR] || curvilinear_[X2DIR]) {
+      std::stringstream msg;
+      msg << "### FATAL ERROR in Reconstruction constructor" << std::endl
+          << "WENO reconstruction supports only uniform Cartesian grids"<< std::endl;
+      ATHENA_ERROR(msg);
+    }
+  }
 
   // Uniform mesh with --coord=cartesian or GR: Minkowski, Schwarzschild, Kerr-Schild,
   // GR-User will use the uniform Cartesian limiter and reconstruction weights
@@ -321,19 +351,19 @@ Reconstruction::Reconstruction(MeshBlock *pmb, ParameterInput *pin) :
     } else { // if (std::strcmp(COORDINATE_SYSTEM, "spherical_polar") == 0) {
       m_coord = 2;
     }
-    if (curvilinear[X1DIR]) {
+    if (curvilinear_[X1DIR]) {
       for (int i=(pmb->is)-NGHOST+2; i<=(pmb->ie)+NGHOST-1; ++i) {
         // nonuniform Beta matrix entries reach uppermost face pmb->ncells1+1
-        if (!uniform[X1DIR]) {  // nonuniform spacing in curvilinear coordinate
+        if (!uniform_[X1DIR]) {  // nonuniform spacing in curvilinear coordinate
           for (int row=0; row<kNrows; row++) {
             b_rhs[row] = std::pow(pco->x1f(i), row);
             for (int col=0; col<kNcols; col++) {
               // Mignone equation 23: simplification of entries in \beta matrix when
               // Jacobian is a simple power of the coordinate, e.g. radial coordinate:
               Real coeff = (m_coord + 1.0)/(col + m_coord + 1.0);
-              int pow_num = col + m_coord + 1;
-              int pow_denom = m_coord + 1;
-              int s = row - kNrows/2;  // rescale index from -2 to +1
+              const int pow_num = col + m_coord + 1;
+              const int pow_denom = m_coord + 1;
+              const int s = row - kNrows/2;  // rescale index from -2 to +1
               // initializing transpose:
               beta[col][row] =
                   coeff*(
@@ -380,9 +410,9 @@ Reconstruction::Reconstruction(MeshBlock *pmb, ParameterInput *pin) :
             c3i(i) = w_sol[2];
             c4i(i) = w_sol[3];
           }
-        } else { // if (uniform[X1DIR]) {
+        } else { // if (uniform_[X1DIR]) {
           // Mignone section 2.2: conservative reconstruction from volume averages
-          Real io = std::abs(i - pmy_block_->is);  // il=is-1 ---> io = 2
+          const Real io = std::abs(i - pmy_block_->is);  // il=is-1 ---> io = 2
           // Notes:
           // - io (i offset) must be floating-point, not integer type. io^4 and io^8 terms
           // in below lines quickly cause overflows of 32-bit and 64-bit integer limtis in
@@ -390,7 +420,7 @@ Reconstruction::Reconstruction(MeshBlock *pmb, ParameterInput *pin) :
           // - io=1 should correspond to "is" (first real cell face)
           // - take absolute value to handle lower x1 ghost zone cell faces properly
           if (std::strcmp(COORDINATE_SYSTEM, "cylindrical") == 0) {
-            Real delta = 120.0*SQR(SQR(io)) - 360.0*SQR(io) + 96.0;
+            const Real delta = 120.0*SQR(SQR(io)) - 360.0*SQR(io) + 96.0;
             // Mignone equation B.9:
             // w_im1
             c1i(i) = -(2.0*io - 3.0)*(5.0*SQR(io)*io + 8.0*SQR(io) - 3.0*io - 4.0)/delta;
@@ -404,7 +434,7 @@ Reconstruction::Reconstruction(MeshBlock *pmb, ParameterInput *pin) :
             c4i(i) = -(2.0*io + 3.0)*(5.0*SQR(io)*io - 8.0*SQR(io) - 3.0*io + 4.0)/delta;
           } else { // if (std::strcmp(COORDINATE_SYSTEM, "spherical_polar") == 0) {
             // Mignone equation B.14:
-            Real delta = 36.0*(15.0*SQR(SQR(SQR(io))) - 85.0*SQR(SQR(io))*SQR(io)
+            const Real delta = 36.0*(15.0*SQR(SQR(SQR(io))) - 85.0*SQR(SQR(io))*SQR(io)
                                + 150.0*SQR(SQR(io)) - 60.0*SQR(io) + 16);
             c1i(i) = -(3.0*SQR(io) - 9.0*io + 7.0)*(
                 15.0*SQR(SQR(io))*SQR(io) + 48.0*SQR(SQR(io))*io
@@ -425,7 +455,7 @@ Reconstruction::Reconstruction(MeshBlock *pmb, ParameterInput *pin) :
           } // end "spherical_polar"
           // TODO(felker): add check for normalization condition, Mignone eq 22.
           // (typical deviations of sum(wghts)!=1.0 are around machine precision)
-        }   // end "uniform[X1DIR]"
+        }   // end "uniform_[X1DIR]"
       }  // end loop over i
 
       // Compute curvilinear geometric factors for limiter (Mignone eq 48): radial
@@ -433,12 +463,10 @@ Reconstruction::Reconstruction(MeshBlock *pmb, ParameterInput *pin) :
       // for nonuniform and uniform radial mesh spacings.
       for (int i=(pmb->is)-1; i<=(pmb->ie)+1; ++i) {
         Real h_plus, h_minus;
-        Real& dx_i   = pco->dx1f(i);
-        Real& xv_i   = pco->x1v(i);
+        const Real& dx_i   = pco->dx1f(i);
 
         // radius may beomce negative in the lower x1 ghost cells:
-        xv_i = 0.5*(pco->x1f(i+1) + pco->x1f(i));
-        xv_i = std::abs(xv_i);
+        const Real xv_i = std::abs(0.5*(pco->x1f(i+1) + pco->x1f(i)));
 
         if (std::strcmp(COORDINATE_SYSTEM, "cylindrical") == 0) {
           // cylindrical radial coordinate
@@ -463,7 +491,7 @@ Reconstruction::Reconstruction(MeshBlock *pmb, ParameterInput *pin) :
         hminus_ratio_i(i) = 2.0;
       }
       // 4th order reconstruction weights along Cartesian-like x1 w/ uniform spacing
-      if (uniform[X1DIR]) {
+      if (uniform_[X1DIR]) {
 #pragma omp simd
         for (int i=(pmb->is)-NGHOST; i<=(pmb->ie)+NGHOST; ++i) {
           // reducing general formula in ppm.cpp corresonds to Mignone eq B.4 weights:
@@ -478,18 +506,18 @@ Reconstruction::Reconstruction(MeshBlock *pmb, ParameterInput *pin) :
       } else { // coeffcients along Cartesian-like x1 with nonuniform mesh spacing
 #pragma omp simd
         for (int i=(pmb->is)-NGHOST+1; i<=(pmb->ie)+NGHOST-1; ++i) {
-          Real& dx_im1 = pco->dx1f(i-1);
-          Real& dx_i   = pco->dx1f(i  );
-          Real& dx_ip1 = pco->dx1f(i+1);
-          Real qe = dx_i/(dx_im1 + dx_i + dx_ip1);       // Outermost coeff in CW eq 1.7
+          const Real& dx_im1 = pco->dx1f(i-1);
+          const Real& dx_i   = pco->dx1f(i  );
+          const Real& dx_ip1 = pco->dx1f(i+1);
+          const Real qe = dx_i/(dx_im1 + dx_i + dx_ip1);  // Outermost coeff in CW eq 1.7
           c1i(i) = qe*(2.0*dx_im1+dx_i)/(dx_ip1 + dx_i); // First term in CW eq 1.7
           c2i(i) = qe*(2.0*dx_ip1+dx_i)/(dx_im1 + dx_i); // Second term in CW eq 1.7
           if (i > (pmb->is)-NGHOST+1) {  // c3-c6 are not computed in first iteration
-            Real& dx_im2 = pco->dx1f(i-2);
-            Real qa = dx_im2 + dx_im1 + dx_i + dx_ip1;
+            const Real& dx_im2 = pco->dx1f(i-2);
+            const Real qa = dx_im2 + dx_im1 + dx_i + dx_ip1;
             Real qb = dx_im1/(dx_im1 + dx_i);
-            Real qc = (dx_im2 + dx_im1)/(2.0*dx_im1 + dx_i);
-            Real qd = (dx_ip1 + dx_i)/(2.0*dx_i + dx_im1);
+            const Real qc = (dx_im2 + dx_im1)/(2.0*dx_im1 + dx_i);
+            const Real qd = (dx_ip1 + dx_i)/(2.0*dx_i + dx_im1);
             qb = qb + 2.0*dx_i*qb/qa*(qc-qd);
             c3i(i) = 1.0 - qb;
             c4i(i) = qb;
@@ -498,7 +526,7 @@ Reconstruction::Reconstruction(MeshBlock *pmb, ParameterInput *pin) :
           }
         }
       }
-    } // end !curvilinear[X1DIR]
+    } // end !curvilinear_[X1DIR]
 
     // Precompute PPM coefficients in x2-direction ---------------------------------------
     if (pmb->block_size.nx2 > 1) {
@@ -512,7 +540,7 @@ Reconstruction::Reconstruction(MeshBlock *pmb, ParameterInput *pin) :
       hplus_ratio_j.NewAthenaArray(nc2);
       hminus_ratio_j.NewAthenaArray(nc2);
 
-      if (curvilinear[X2DIR]) {
+      if (curvilinear_[X2DIR]) {
         // meridional/polar/theta direction in spherical-polar coordinates
         std::function<int(int)> factorial;  // recursive lambda function
                                             // (C++14 would make this easier)
@@ -523,8 +551,8 @@ Reconstruction::Reconstruction(MeshBlock *pmb, ParameterInput *pin) :
           // spacings in order to precompute reconstruction weights
           for (int row=0; row<kNrows; row++) {
             b_rhs[row] = std::pow(pco->x2f(j), row);
-            int s = row - kNrows/2;  // rescale index from -2 to +1
-            Real coeff = 1.0/(std::cos(pco->x2f(j+s)) - std::cos(pco->x2f(j+s+1)));
+            const int s = row - kNrows/2;  // rescale index from -2 to +1
+            const Real coeff = 1.0/(std::cos(pco->x2f(j+s)) - std::cos(pco->x2f(j+s+1)));
             for (int col=0; col<kNcols; col++) {
               beta[col][row] = 0.0;
               for (int k=0; k<=col; k++) {
@@ -567,11 +595,11 @@ Reconstruction::Reconstruction(MeshBlock *pmb, ParameterInput *pin) :
           // note: x2 may become negative at lower boundary ghost cells and may exceedc
           // pi at upper boundary ghost cells
           // TODO(felker): may need to take abs() or change signs of terms in ghost zone
-          Real& dx_j   = pco->dx2f(j);
-          Real& xf_j   = pco->x2f(j);
-          Real& xf_jp1   = pco->x2f(j+1);
-          Real dmu = std::cos(xf_j) - std::cos(xf_jp1);
-          Real dmu_tilde = std::sin(xf_j) - std::sin(xf_jp1);
+          const Real& dx_j   = pco->dx2f(j);
+          const Real& xf_j   = pco->x2f(j);
+          const Real& xf_jp1   = pco->x2f(j+1);
+          const Real dmu = std::cos(xf_j) - std::cos(xf_jp1);
+          const Real dmu_tilde = std::sin(xf_j) - std::sin(xf_jp1);
           h_plus = (dx_j*(dmu_tilde + dx_j*std::cos(xf_jp1)))/(
               dx_j*(std::sin(xf_j) + std::sin(xf_jp1)) - 2.0*dmu);
           h_minus = -(dx_j*(dmu_tilde + dx_j*std::cos(xf_j)))/(
@@ -590,7 +618,7 @@ Reconstruction::Reconstruction(MeshBlock *pmb, ParameterInput *pin) :
           hminus_ratio_j(j) = 2.0;
         }
         // 4th order reconstruction weights along Cartesian-like x2 w/ uniform spacing
-        if (uniform[X2DIR]) {
+        if (uniform_[X2DIR]) {
 #pragma omp simd
           for (int j=(pmb->js)-NGHOST; j<=(pmb->je)+NGHOST; ++j) {
             c1j(j) = 0.5;
@@ -603,19 +631,19 @@ Reconstruction::Reconstruction(MeshBlock *pmb, ParameterInput *pin) :
         } else { // coeffcients along Cartesian-like x2 with nonuniform mesh spacing
 #pragma omp simd
           for (int j=(pmb->js)-NGHOST+2; j<=(pmb->je)+NGHOST-1; ++j) {
-            Real& dx_jm1 = pco->dx2f(j-1);
-            Real& dx_j   = pco->dx2f(j  );
-            Real& dx_jp1 = pco->dx2f(j+1);
-            Real qe = dx_j/(dx_jm1 + dx_j + dx_jp1);       // Outermost coeff in CW eq 1.7
+            const Real& dx_jm1 = pco->dx2f(j-1);
+            const Real& dx_j   = pco->dx2f(j  );
+            const Real& dx_jp1 = pco->dx2f(j+1);
+            const Real qe = dx_j/(dx_jm1 + dx_j + dx_jp1); // Outermost coeff in CW eq1.7
             c1j(j) = qe*(2.0*dx_jm1 + dx_j)/(dx_jp1 + dx_j); // First term in CW eq 1.7
             c2j(j) = qe*(2.0*dx_jp1 + dx_j)/(dx_jm1 + dx_j); // Second term in CW eq 1.7
 
             if (j > (pmb->js)-NGHOST+1) {  // c3-c6 are not computed in first iteration
-              Real& dx_jm2 = pco->dx2f(j-2);
-              Real qa = dx_jm2 + dx_jm1 + dx_j + dx_jp1;
+              const Real& dx_jm2 = pco->dx2f(j-2);
+              const Real qa = dx_jm2 + dx_jm1 + dx_j + dx_jp1;
               Real qb = dx_jm1/(dx_jm1 + dx_j);
-              Real qc = (dx_jm2 + dx_jm1)/(2.0*dx_jm1 + dx_j);
-              Real qd = (dx_jp1 + dx_j)/(2.0*dx_j + dx_jm1);
+              const Real qc = (dx_jm2 + dx_jm1)/(2.0*dx_jm1 + dx_j);
+              const Real qd = (dx_jp1 + dx_j)/(2.0*dx_j + dx_jm1);
               qb = qb + 2.0*dx_j*qb/qa*(qc-qd);
               c3j(j) = 1.0 - qb;
               c4j(j) = qb;
@@ -624,7 +652,7 @@ Reconstruction::Reconstruction(MeshBlock *pmb, ParameterInput *pin) :
             }
           }
         } // end nonuniform Cartesian-like
-      } // end !curvilinear[X2DIR]
+      } // end !curvilinear_[X2DIR]
     } // end 2D or 3D
 
     // Precompute PPM coefficients in x3-direction
@@ -639,8 +667,18 @@ Reconstruction::Reconstruction(MeshBlock *pmb, ParameterInput *pin) :
       hplus_ratio_k.NewAthenaArray(nc3);
       hminus_ratio_k.NewAthenaArray(nc3);
 
+      // Compute geometric factors for x3 limiter (Mignone eq 48)
+      // (no curvilinear corrections in x3)
+      for (int k=(pmb->ks)-1; k<=(pmb->ke)+1; ++k) {
+        // h_plus = 3.0;
+        // h_minus = 3.0;
+        // Ratios are both = 2 for Cartesian and all curviliniear coords
+        hplus_ratio_k(k) = 2.0;
+        hminus_ratio_k(k) = 2.0;
+      }
+
       // reconstruction coeffiencients in x3, Cartesian-like coordinate:
-      if (uniform[X3DIR]) { // uniform spacing
+      if (uniform_[X3DIR]) { // uniform spacing
 #pragma omp simd
         for (int k=(pmb->ks)-NGHOST; k<=(pmb->ke)+NGHOST; ++k) {
           c1k(k) = 0.5;
@@ -654,34 +692,25 @@ Reconstruction::Reconstruction(MeshBlock *pmb, ParameterInput *pin) :
       } else { // nonuniform spacing
 #pragma omp simd
         for (int k=(pmb->ks)-NGHOST+2; k<=(pmb->ke)+NGHOST-1; ++k) {
-          Real& dx_km1 = pco->dx3f(k-1);
-          Real& dx_k   = pco->dx3f(k  );
-          Real& dx_kp1 = pco->dx3f(k+1);
-          Real qe = dx_k/(dx_km1 + dx_k + dx_kp1);       // Outermost coeff in CW eq 1.7
+          const Real& dx_km1 = pco->dx3f(k-1);
+          const Real& dx_k   = pco->dx3f(k  );
+          const Real& dx_kp1 = pco->dx3f(k+1);
+          const Real qe = dx_k/(dx_km1 + dx_k + dx_kp1);  // Outermost coeff in CW eq 1.7
           c1k(k) = qe*(2.0*dx_km1+dx_k)/(dx_kp1 + dx_k); // First term in CW eq 1.7
           c2k(k) = qe*(2.0*dx_kp1+dx_k)/(dx_km1 + dx_k); // Second term in CW eq 1.7
 
           if (k > (pmb->ks)-NGHOST+1) {  // c3-c6 are not computed in first iteration
-            Real& dx_km2 = pco->dx3f(k-2);
-            Real qa = dx_km2 + dx_km1 + dx_k + dx_kp1;
+            const Real& dx_km2 = pco->dx3f(k-2);
+            const Real qa = dx_km2 + dx_km1 + dx_k + dx_kp1;
             Real qb = dx_km1/(dx_km1 + dx_k);
-            Real qc = (dx_km2 + dx_km1)/(2.0*dx_km1 + dx_k);
-            Real qd = (dx_kp1 + dx_k)/(2.0*dx_k + dx_km1);
+            const Real qc = (dx_km2 + dx_km1)/(2.0*dx_km1 + dx_k);
+            const Real qd = (dx_kp1 + dx_k)/(2.0*dx_k + dx_km1);
             qb = qb + 2.0*dx_k*qb/qa*(qc-qd);
             c3k(k) = 1.0 - qb;
             c4k(k) = qb;
             c5k(k) = dx_k/qa*qd;
             c6k(k) = -dx_km1/qa*qc;
           }
-        }
-        // Compute geometric factors for x3 limiter (Mignone eq 48)
-        // (no curvilinear corrections in x3)
-        for (int k=(pmb->ks)-1; k<=(pmb->ke)+1; ++k) {
-          // h_plus = 3.0;
-          // h_minus = 3.0;
-          // Ratios are both = 2 for Cartesian and all curviliniear coords
-          hplus_ratio_k(k) = 2.0;
-          hminus_ratio_k(k) = 2.0;
         }
       }
     }
