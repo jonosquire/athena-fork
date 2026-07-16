@@ -4,8 +4,8 @@
 // Licensed under the 3-clause BSD License, see LICENSE file for details
 //========================================================================================
 //========================================================================================
-//! \file blast.cpp
-//! \brief Problem generator for cylindrical z pinch problem
+//! \file z_pinch_fueled.cpp
+//! \brief Driven cylindrical z-pinch with separated particle/heat sources and tracers
 //!
 //! This file sets up the cylindrical z pinch problem for Athena++ by defining initial
 //! conditions, boundary conditions, and source/forcing functions.
@@ -17,10 +17,11 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <iostream>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <string>
-#include <iostream>
 #include <vector>
 
 // Athena++ headers
@@ -33,6 +34,7 @@
 #include "../hydro/hydro.hpp"
 #include "../mesh/mesh.hpp"
 #include "../parameter_input.hpp"
+#include "../scalars/scalars.hpp"
 
 // Forward declarations
 void InnerX1HardWall(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &prim,
@@ -42,81 +44,245 @@ void OuterX1HardWall(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &prim,
                      FaceField &b, Real time, Real dt,
                      int il, int iu, int jl, int ju, int kl, int ku, int ngh);
 
-void AddDensity(MeshBlock *pmb, const Real time, const Real dt,
-                const AthenaArray<Real> &prim, const AthenaArray<Real> &prim_scalar,
-                const AthenaArray<Real> &bcc, AthenaArray<Real> &cons,
-                AthenaArray<Real> &cons_scalar);
+void ApplyFueling(MeshBlock *pmb, const Real time, const Real dt,
+                  const AthenaArray<Real> &prim,
+                  const AthenaArray<Real> &prim_scalar,
+                  const AthenaArray<Real> &bcc, AthenaArray<Real> &cons,
+                  AthenaArray<Real> &cons_scalar);
 
-// Global variables
-// NOTE: input_location_dens is the centre of the density Gaussian (set near rout in input file).
-//       sigma_dens controls the width of the density Gaussian independently of sigma (pressure).
-Real bin, rin, presmin, densmin, beta, dens_init, pres_init, total_volume,
-     sigma, sigma_dens,
-     input_location, input_location_dens,
-     igm1, dens_added, thermal_energy_added, dens_removed, energy_removed,
-     pressure_current, sink_rate, sink_width,
-     injection_rate_dens, injection_rate_pres,
-     sink_rate_dens, sink_rate_energy,
-     d0, rpeak, expdens, exppres, r_const, rcSmooth;
+namespace {
 
-// History output functions
-Real HistoryAddedD(MeshBlock *pmb, int iout){
-  Real total_dens_added = dens_added;
-  dens_added = 0.;
-  return total_dens_added;
+// Per-MeshBlock values written by the source routine.  Storing these on each block makes
+// Athena++'s standard history reduction correct for multiple blocks, MPI, and OpenMP.
+enum BlockDiagnostic {
+  kMassSourceRate = 0,
+  kThermalSourceRate,
+  kScalar1SourceRate,
+  kScalar2SourceRate,
+  kMassSinkRate,
+  kThermalSinkRate,
+  kScalar1SinkRate,
+  kScalar2SinkRate,
+  kTotalEnergySourceRate,
+  kTotalEnergySinkRate,
+  kNumBlockDiagnostics
+};
+
+enum HistoryDiagnostic {
+  kThermalEnergy = 0,
+  kHistMassSourceRate,
+  kHistThermalSourceRate,
+  kHistScalar1SourceRate,
+  kHistScalar2SourceRate,
+  kHistMassSinkRate,
+  kHistThermalSinkRate,
+  kHistScalar1SinkRate,
+  kHistScalar2SinkRate,
+  kHistTotalEnergySourceRate,
+  kHistTotalEnergySinkRate,
+  kPressureSourceNormalization,
+  kDensitySourceNormalization,
+  kSinkNormalization,
+  kMassFluxProbe1,
+  kMassFluxProbe2,
+  kMassFluxProbe3,
+  kBoundaryMassFlux,
+  kBoundaryEnergyFlux,
+  kBoundaryScalar1Flux,
+  kBoundaryScalar2Flux,
+  kNumHistoryDiagnostics
+};
+
+Real bin, rin, presmin, densmin, beta, dens_init, pres_init, total_volume;
+Real sigma_p, sigma_rho, r_p, r_rho;
+Real source_integral_p, source_integral_rho, sink_integral;
+Real sink_width, injection_rate_dens, injection_rate_pres;
+Real injection_rate_scalar1, injection_rate_scalar2;
+Real sink_rate_dens, sink_rate_energy;
+Real d0, rpeak, expdens, exppres, r_const, rcSmooth;
+Real probe_radius[3], probe_volume[3];
+int forcing_flag;
+
+Real GetNewOrLegacyReal(ParameterInput *pin, const char *new_name,
+                        const char *legacy_name, Real default_value) {
+  if (pin->DoesParameterExist("problem", new_name)) {
+    return pin->GetReal("problem", new_name);
+  }
+  if (legacy_name != nullptr && pin->DoesParameterExist("problem", legacy_name)) {
+    Real value = pin->GetReal("problem", legacy_name);
+    pin->GetOrAddReal("problem", new_name, value);
+    if (Globals::my_rank == 0) {
+      std::cout << "### NOTE: <problem>/" << legacy_name
+                << " is deprecated; use " << new_name << " = " << value << "\n";
+    }
+    return value;
+  }
+  return pin->GetOrAddReal("problem", new_name, default_value);
 }
-Real HistoryAddedP(MeshBlock *pmb, int iout){
-  Real total_energy_added = thermal_energy_added;
-  thermal_energy_added = 0.;
-  return total_energy_added;
+
+inline Real UnnormalizedGaussian(Real r, Real centre, Real width) {
+  return std::exp(-0.5*SQR((r-centre)/width));
 }
-Real HistoryAddedp(MeshBlock *pmb, int iout){
-  Real total_pressure = pressure_current;
-  pressure_current = 0.;
-  return total_pressure;
+
+inline Real UnnormalizedSink(Real r, Real rout) {
+  return std::exp((r-rout)/sink_width);
 }
-Real HistoryAddedDR(MeshBlock *pmb, int iout){
-  Real total_dens_removed = dens_removed;
-  dens_removed = 0.;
-  return total_dens_removed;
+
+Real HistoryDiagnostics(MeshBlock *pmb, int iout) {
+  AthenaArray<Real> vol(pmb->ncells1);
+
+  if (iout == kThermalEnergy) {
+    Real result = 0.0;
+    for (int k=pmb->ks; k<=pmb->ke; ++k) {
+      for (int j=pmb->js; j<=pmb->je; ++j) {
+        pmb->pcoord->CellVolume(k, j, pmb->is, pmb->ie, vol);
+        for (int i=pmb->is; i<=pmb->ie; ++i) {
+          Real den = pmb->phydro->u(IDN,k,j,i);
+          Real kinetic = 0.5/den*(SQR(pmb->phydro->u(IM1,k,j,i))
+                                  + SQR(pmb->phydro->u(IM2,k,j,i))
+                                  + SQR(pmb->phydro->u(IM3,k,j,i)));
+          Real magnetic = 0.5*(SQR(pmb->pfield->bcc(IB1,k,j,i))
+                               + SQR(pmb->pfield->bcc(IB2,k,j,i))
+                               + SQR(pmb->pfield->bcc(IB3,k,j,i)));
+          result += vol(i)*(pmb->phydro->u(IEN,k,j,i)-kinetic-magnetic);
+        }
+      }
+    }
+    return result;
+  }
+
+  if (iout >= kHistMassSourceRate && iout <= kHistTotalEnergySinkRate) {
+    int block_index = iout-kHistMassSourceRate;
+    return pmb->ruser_meshblock_data[0](block_index);
+  }
+
+  if (iout >= kPressureSourceNormalization && iout <= kSinkNormalization) {
+    Real result = 0.0;
+    Real rout = pmb->pmy_mesh->mesh_size.x1max;
+    for (int k=pmb->ks; k<=pmb->ke; ++k) {
+      for (int j=pmb->js; j<=pmb->je; ++j) {
+        pmb->pcoord->CellVolume(k, j, pmb->is, pmb->ie, vol);
+        for (int i=pmb->is; i<=pmb->ie; ++i) {
+          Real r = pmb->pcoord->x1v(i);
+          if (iout == kPressureSourceNormalization) {
+            result += vol(i)*UnnormalizedGaussian(r, r_p, sigma_p)/source_integral_p;
+          } else if (iout == kDensitySourceNormalization) {
+            result += vol(i)*UnnormalizedGaussian(r, r_rho, sigma_rho)
+                      /source_integral_rho;
+          } else {
+            result += vol(i)*UnnormalizedSink(r, rout)/sink_integral;
+          }
+        }
+      }
+    }
+    return result;
+  }
+
+  if (iout >= kMassFluxProbe1 && iout <= kMassFluxProbe3) {
+    int nprobe = iout-kMassFluxProbe1;
+    Real result = 0.0;
+    for (int k=pmb->ks; k<=pmb->ke; ++k) {
+      for (int j=pmb->js; j<=pmb->je; ++j) {
+        pmb->pcoord->CellVolume(k, j, pmb->is, pmb->ie, vol);
+        for (int i=pmb->is; i<=pmb->ie; ++i) {
+          bool in_shell = (probe_radius[nprobe] >= pmb->pcoord->x1f(i)
+                           && probe_radius[nprobe] < pmb->pcoord->x1f(i+1));
+          if (in_shell) {
+            result += vol(i)*pmb->phydro->u(IM1,k,j,i)/probe_volume[nprobe];
+          }
+        }
+      }
+    }
+    return result;
+  }
+
+  if (iout >= kBoundaryMassFlux && iout <= kBoundaryScalar2Flux) {
+    if (pmb->pmy_mesh->time <= pmb->pmy_mesh->start_time) return 0.0;
+    Real result = 0.0;
+    Real xmin = pmb->pmy_mesh->mesh_size.x1min;
+    Real xmax = pmb->pmy_mesh->mesh_size.x1max;
+    Real scale = std::max(std::abs(xmin), std::abs(xmax));
+    Real tol = 32.0*std::numeric_limits<Real>::epsilon()*std::max(scale, 1.0);
+    bool at_inner = std::abs(pmb->pcoord->x1f(pmb->is)-xmin) < tol;
+    bool at_outer = std::abs(pmb->pcoord->x1f(pmb->ie+1)-xmax) < tol;
+    for (int k=pmb->ks; k<=pmb->ke; ++k) {
+      for (int j=pmb->js; j<=pmb->je; ++j) {
+        if (at_inner) {
+          Real area = pmb->pcoord->GetFace1Area(k,j,pmb->is);
+          if (iout == kBoundaryMassFlux) {
+            result -= area*pmb->phydro->flux[X1DIR](IDN,k,j,pmb->is);
+          } else if (iout == kBoundaryEnergyFlux) {
+            result -= area*pmb->phydro->flux[X1DIR](IEN,k,j,pmb->is);
+          } else {
+            int scalar = iout-kBoundaryScalar1Flux;
+            result -= area*pmb->pscalars->s_flux[X1DIR](scalar,k,j,pmb->is);
+          }
+        }
+        if (at_outer) {
+          Real area = pmb->pcoord->GetFace1Area(k,j,pmb->ie+1);
+          if (iout == kBoundaryMassFlux) {
+            result += area*pmb->phydro->flux[X1DIR](IDN,k,j,pmb->ie+1);
+          } else if (iout == kBoundaryEnergyFlux) {
+            result += area*pmb->phydro->flux[X1DIR](IEN,k,j,pmb->ie+1);
+          } else {
+            int scalar = iout-kBoundaryScalar1Flux;
+            result += area*pmb->pscalars->s_flux[X1DIR](scalar,k,j,pmb->ie+1);
+          }
+        }
+      }
+    }
+    return result;
+  }
+
+  return 0.0;
 }
-Real HistoryAddedER(MeshBlock *pmb, int iout){
-  Real total_energy_removed = energy_removed;
-  energy_removed = 0.;
-  return total_energy_removed;
-}
+
+} // namespace
 
 //----------------------------------------------------------------------------------------
 // Function: Mesh::InitUserMeshData
 void Mesh::InitUserMeshData(ParameterInput *pin) {
+  if (std::strcmp(COORDINATE_SYSTEM, "cylindrical") != 0) {
+    std::stringstream msg;
+    msg << "### FATAL ERROR in z_pinch_fueled: cylindrical coordinates are required\n";
+    ATHENA_ERROR(msg);
+  }
+  if (!MAGNETIC_FIELDS_ENABLED || !NON_BAROTROPIC_EOS) {
+    std::stringstream msg;
+    msg << "### FATAL ERROR in z_pinch_fueled: adiabatic MHD is required\n";
+    ATHENA_ERROR(msg);
+  }
+  if (NSCALARS != 2) {
+    std::stringstream msg;
+    msg << "### FATAL ERROR in z_pinch_fueled: configure with --nscalars=2; got "
+        << NSCALARS << "\n";
+    ATHENA_ERROR(msg);
+  }
+  if (multilevel) {
+    std::stringstream msg;
+    msg << "### FATAL ERROR in z_pinch_fueled: SMR/AMR is outside this pgen's "
+        << "discrete-normalization contract\n";
+    ATHENA_ERROR(msg);
+  }
+
   bin      = pin->GetReal("problem", "bin");
   rin      = pin->GetReal("mesh", "x1min");
   presmin  = pin->GetOrAddReal("problem", "presmin", 0.1);
   densmin  = pin->GetOrAddReal("problem", "densmin", 0.1);
   beta     = pin->GetOrAddReal("problem", "beta", 0.5);
 
-  // Pressure source parameters (centre of domain, unchanged)
-  sigma          = pin->GetOrAddReal("problem", "input_gaussian_sigma", 0.05);
-  input_location = pin->GetOrAddReal("problem", "input_location", 1.5);
+  r_p       = GetNewOrLegacyReal(pin, "r_p", "input_location", 1.0);
+  sigma_p   = GetNewOrLegacyReal(pin, "sigma_p", "input_gaussian_sigma", 0.2);
+  r_rho     = GetNewOrLegacyReal(pin, "r_rho", "input_location_dens", 2.3);
+  sigma_rho = GetNewOrLegacyReal(pin, "sigma_rho", "sigma_dens", 0.15);
+  sink_width = pin->GetOrAddReal("problem", "sink_width", 0.3);
 
-  // Density source parameters (outer edge).
-  // input_location_dens defaults to mesh x1max; set explicitly in input file for control.
-  // NOTE: the outer BC (OuterX1HardWall) extrapolates density as r^{-2}. If the density
-  //       source is active near rout, the BC ghost cells will drain mass back out each step.
-  //       Consider switching the outer density BC to a fixed or zero-gradient condition
-  //       when this source is active. See OuterX1HardWall below.
-  Real rout_global       = pin->GetReal("mesh", "x1max");
-  input_location_dens    = pin->GetOrAddReal("problem", "input_location_dens", rout_global);
-  sigma_dens             = pin->GetOrAddReal("problem", "sigma_dens", sigma);
-
-  sink_rate          = pin->GetOrAddReal("problem", "sink_rate", 0.2);
-  sink_width         = pin->GetOrAddReal("problem", "sink_width", 0.3);
-  dens_init          = pin->GetOrAddReal("problem", "dens_init", 8.5163406660979639);
-  pres_init          = pin->GetOrAddReal("problem", "pres_init", 4.4954022196421644);
   injection_rate_dens  = pin->GetOrAddReal("problem", "injection_rate_dens", 0.1);
   injection_rate_pres  = pin->GetOrAddReal("problem", "injection_rate_pres", 0.1);
+  injection_rate_scalar1 = pin->GetOrAddReal("problem", "injection_rate_scalar1", 1.e-4);
+  injection_rate_scalar2 = pin->GetOrAddReal("problem", "injection_rate_scalar2", 1.e-4);
   sink_rate_dens     = pin->GetOrAddReal("problem", "sink_rate_dens", 0.1);
-  sink_rate_energy   = pin->GetOrAddReal("problem", " sink_rate_energy", 0.1);
+  sink_rate_energy   = pin->GetOrAddReal("problem", "sink_rate_energy", 0.1);
 
   d0       = pin->GetOrAddReal("problem", "d0",      1.0);
   rpeak    = pin->GetReal          ("problem", "rpeak");
@@ -125,29 +291,144 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   r_const  = pin->GetOrAddReal     ("problem", "r_const", 2.0);
   rcSmooth = pin->GetOrAddReal     ("problem", "rcSmooth", 5.0);
 
+  probe_radius[0] = pin->GetOrAddReal("problem", "mass_flux_probe1", 1.0);
+  probe_radius[1] = pin->GetOrAddReal("problem", "mass_flux_probe2", 1.8);
+  probe_radius[2] = pin->GetOrAddReal("problem", "mass_flux_probe3", 2.4);
+
+  Real rout = mesh_size.x1max;
+  if (sigma_p <= 0.0 || sigma_rho <= 0.0 || sink_width <= 0.0
+      || r_p < rin || r_p > rout || r_rho < rin || r_rho > rout) {
+    std::stringstream msg;
+    msg << "### FATAL ERROR in z_pinch_fueled: invalid source/sink location or width\n";
+    ATHENA_ERROR(msg);
+  }
+  for (int n=0; n<3; ++n) {
+    if (probe_radius[n] < rin || probe_radius[n] >= rout) {
+      std::stringstream msg;
+      msg << "### FATAL ERROR in z_pinch_fueled: mass_flux_probe" << n+1
+          << " must lie in [x1min,x1max)\n";
+      ATHENA_ERROR(msg);
+    }
+    probe_volume[n] = 0.0;
+  }
+
+  // Compute exact root-grid cylindrical shell volumes and volume-centred radii.  This
+  // duplicates Cylindrical's geometry formulas without needing MeshBlocks (which do not
+  // exist yet here), and is safe before the OpenMP task list begins.
+  source_integral_p = source_integral_rho = sink_integral = 0.0;
+  dens_init = pres_init = total_volume = 0.0;
+  Real dphi_dz = (mesh_size.x2max-mesh_size.x2min)
+                 *(mesh_size.x3max-mesh_size.x3min);
+  Real beta_correct = beta/(1.0+std::exp(-rcSmooth*(r_const-rpeak)))
+                      + beta*std::pow(1.0+SQR(r_const-rpeak), -exppres/2.0)
+                        /(1.0+std::exp(-rcSmooth*(rpeak-r_const)));
+  for (int i=0; i<mesh_size.nx1; ++i) {
+    Real xl = ComputeMeshGeneratorX(i, mesh_size.nx1,
+                                    use_uniform_meshgen_fn_[X1DIR]);
+    Real xr = ComputeMeshGeneratorX(i+1, mesh_size.nx1,
+                                    use_uniform_meshgen_fn_[X1DIR]);
+    Real rm = MeshGenerator_[X1DIR](xl, mesh_size);
+    Real rp = MeshGenerator_[X1DIR](xr, mesh_size);
+    Real r = TWO_3RD*(rp*rp*rp-rm*rm*rm)/(rp*rp-rm*rm);
+    Real shell_volume = 0.5*(rp*rp-rm*rm)*dphi_dz;
+
+    Real den, pres;
+    if (r < rpeak) {
+      den = 0.5*(d0+densmin)
+            - 0.5*(d0-densmin)*std::cos(PI*(r-rin)/(rpeak-rin));
+      pres = 0.5*(beta_correct+presmin)
+             - 0.5*(beta_correct-presmin)*std::cos(PI*(r-rin)/(rpeak-rin));
+    } else {
+      den = d0*std::pow(1.0+SQR(r-rpeak), -expdens/2.0);
+      pres = beta*std::pow(1.0+SQR(r-rpeak), -exppres/2.0)
+             /(1.0+std::exp(-rcSmooth*(r_const-r)))
+             + beta*std::pow(1.0+SQR(r_const-rpeak), -exppres/2.0)
+               /(1.0+std::exp(-rcSmooth*(r-r_const)));
+    }
+    dens_init += den*shell_volume;
+    pres_init += pres*shell_volume;
+    total_volume += shell_volume;
+    source_integral_p += UnnormalizedGaussian(r, r_p, sigma_p)*shell_volume;
+    source_integral_rho += UnnormalizedGaussian(r, r_rho, sigma_rho)*shell_volume;
+    sink_integral += UnnormalizedSink(r, rout)*shell_volume;
+    for (int n=0; n<3; ++n) {
+      if (probe_radius[n] >= rm && probe_radius[n] < rp) {
+        probe_volume[n] = shell_volume;
+      }
+    }
+  }
+
+  if (source_integral_p <= 0.0 || source_integral_rho <= 0.0 || sink_integral <= 0.0) {
+    std::stringstream msg;
+    msg << "### FATAL ERROR in z_pinch_fueled: zero discrete source/sink integral\n";
+    ATHENA_ERROR(msg);
+  }
+
   if (mesh_bcs[BoundaryFace::inner_x1] == GetBoundaryFlag("user"))
     EnrollUserBoundaryFunction(BoundaryFace::inner_x1, InnerX1HardWall);
   if (mesh_bcs[BoundaryFace::outer_x1] == GetBoundaryFlag("user"))
     EnrollUserBoundaryFunction(BoundaryFace::outer_x1, OuterX1HardWall);
 
-  Real forcing_flag = pin->GetOrAddInteger("problem", "forcing_flag", 0);
-  if (forcing_flag == 1){
-    EnrollUserExplicitSourceFunction(AddDensity);
-    AllocateUserHistoryOutput(5);
-    EnrollUserHistoryOutput(0, HistoryAddedD,  "dens_added");
-    EnrollUserHistoryOutput(1, HistoryAddedP,  "thermal_energy_added");
-    EnrollUserHistoryOutput(2, HistoryAddedp,  "pressure_current");
-    EnrollUserHistoryOutput(3, HistoryAddedDR, "dens_removed");
-    EnrollUserHistoryOutput(4, HistoryAddedER, "energy_removed");
+  forcing_flag = pin->GetOrAddInteger("problem", "forcing_flag", 0);
+  if (forcing_flag == 1) {
+    EnrollUserExplicitSourceFunction(ApplyFueling);
+  }
+
+  AllocateUserHistoryOutput(kNumHistoryDiagnostics);
+  EnrollUserHistoryOutput(kThermalEnergy, HistoryDiagnostics, "thermal-E");
+  EnrollUserHistoryOutput(kHistMassSourceRate, HistoryDiagnostics, "mass_src");
+  EnrollUserHistoryOutput(kHistThermalSourceRate, HistoryDiagnostics, "Eth_src");
+  EnrollUserHistoryOutput(kHistScalar1SourceRate, HistoryDiagnostics, "ash_src");
+  EnrollUserHistoryOutput(kHistScalar2SourceRate, HistoryDiagnostics, "imp_src");
+  EnrollUserHistoryOutput(kHistMassSinkRate, HistoryDiagnostics, "mass_sink");
+  EnrollUserHistoryOutput(kHistThermalSinkRate, HistoryDiagnostics, "Eth_sink");
+  EnrollUserHistoryOutput(kHistScalar1SinkRate, HistoryDiagnostics, "ash_sink");
+  EnrollUserHistoryOutput(kHistScalar2SinkRate, HistoryDiagnostics, "imp_sink");
+  EnrollUserHistoryOutput(kHistTotalEnergySourceRate, HistoryDiagnostics, "Etot_src");
+  EnrollUserHistoryOutput(kHistTotalEnergySinkRate, HistoryDiagnostics, "Etot_sink");
+  EnrollUserHistoryOutput(kPressureSourceNormalization, HistoryDiagnostics, "Gp_int");
+  EnrollUserHistoryOutput(kDensitySourceNormalization, HistoryDiagnostics, "Grho_int");
+  EnrollUserHistoryOutput(kSinkNormalization, HistoryDiagnostics, "W_int");
+  EnrollUserHistoryOutput(kMassFluxProbe1, HistoryDiagnostics, "rho_ur_p1");
+  EnrollUserHistoryOutput(kMassFluxProbe2, HistoryDiagnostics, "rho_ur_p2");
+  EnrollUserHistoryOutput(kMassFluxProbe3, HistoryDiagnostics, "rho_ur_p3");
+  EnrollUserHistoryOutput(kBoundaryMassFlux, HistoryDiagnostics, "mass_bnd_out");
+  EnrollUserHistoryOutput(kBoundaryEnergyFlux, HistoryDiagnostics, "Etot_bnd_out");
+  EnrollUserHistoryOutput(kBoundaryScalar1Flux, HistoryDiagnostics, "ash_bnd_out");
+  EnrollUserHistoryOutput(kBoundaryScalar2Flux, HistoryDiagnostics, "imp_bnd_out");
+
+  if (Globals::my_rank == 0) {
+    std::cout << "z_pinch_fueled discrete setup:\n"
+              << "  M0=" << dens_init << "  integral(p0)=" << pres_init
+              << "  volume=" << total_volume << "\n"
+              << "  r_p=" << r_p << " sigma_p=" << sigma_p
+              << "  integral(g_p)=" << source_integral_p << "\n"
+              << "  r_rho=" << r_rho << " sigma_rho=" << sigma_rho
+              << "  integral(g_rho)=" << source_integral_rho << "\n"
+              << "  sink_width=" << sink_width
+              << "  integral(w)=" << sink_integral << "\n"
+              << "  analytic rates: mass=" << injection_rate_dens*dens_init
+              << " Eth=" << injection_rate_pres*pres_init
+                                 /(pin->GetReal("hydro", "gamma")-1.0)
+              << " ash=" << injection_rate_scalar1*dens_init
+              << " impurity=" << injection_rate_scalar2*dens_init << "\n";
   }
 
   return;
 }
 
 //----------------------------------------------------------------------------------------
+//! \fn void MeshBlock::InitUserMeshBlockData(ParameterInput *pin)
+void MeshBlock::InitUserMeshBlockData(ParameterInput *pin) {
+  AllocateRealUserMeshBlockDataField(1);
+  ruser_meshblock_data[0].NewAthenaArray(kNumBlockDiagnostics);
+  for (int n=0; n<kNumBlockDiagnostics; ++n) ruser_meshblock_data[0](n) = 0.0;
+}
+
+//----------------------------------------------------------------------------------------
 // Function: trapezoidalIntegration1
 double trapezoidalIntegration1(double r, int N, double p0, double presmin,
-                                double exppres, double rpeak, double rin){
+                                double exppres, double rpeak, double rin) {
   double h = (r - rin) / N;
   double sum = 0;
   for (int m = 1; m < N; ++m) {
@@ -160,7 +441,7 @@ double trapezoidalIntegration1(double r, int N, double p0, double presmin,
 //----------------------------------------------------------------------------------------
 // Function: trapezoidalIntegration2
 double trapezoidalIntegration2(double rpeak, double end, int N, double beta,
-                                double exppres, double rcSmooth, double r_const){
+                                double exppres, double rcSmooth, double r_const) {
   double h = (end - rpeak) / N;
 
   double exp_rc_end    = exp(-rcSmooth*(r_const-end));
@@ -180,7 +461,7 @@ double trapezoidalIntegration2(double rpeak, double end, int N, double beta,
 
   double sum = 1/2 * SQR(end)*(-first_part_end - second_part_end + third_part_end);
 
-  for (int m = 1; m < N; ++m){
+  for (int m = 1; m < N; ++m) {
     double x = rpeak + m*h;
 
     double exp_rc_x    = exp(-rcSmooth*(r_const-x));
@@ -215,14 +496,12 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
   densmin = pin->GetOrAddReal("problem", "densmin", 0.1);
   Real exppres  = pin->GetOrAddReal("problem", "exppres", 1);
   Real expdens  = pin->GetReal("problem", "expdens");
-  Real sharpness = pin->GetOrAddReal("problem", "sharpness", 1);
   Real gamma = peos->GetGamma();
   Real gm1   = gamma - 1.0;
-  Real N     = pin->GetOrAddInteger("problem", "N", 1000);
+  int N      = pin->GetOrAddInteger("problem", "N", 1000);
   rin  = pmy_mesh->mesh_size.x1min;
   Real rout  = pmy_mesh->mesh_size.x1max;
   Real Lz    = pmy_mesh->mesh_size.x3max - pmy_mesh->mesh_size.x3min;
-  Real Lx    = rout - rin;
   Real Amp   = pin->GetOrAddReal("problem", "amp", 0.01);
   Real emode_width = pin->GetOrAddReal("problem", "emode_width", 0.2);
   Real rcSmooth    = pin->GetOrAddReal("problem", "rcSmooth", 5.);
@@ -238,15 +517,12 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
         << "Unrecognized COORDINATE_SYSTEM=" << COORDINATE_SYSTEM << std::endl;
     ATHENA_ERROR(msg);
   }
-  if (not MAGNETIC_FIELDS_ENABLED) {
+  if (!MAGNETIC_FIELDS_ENABLED) {
     std::stringstream msg;
     msg << "### FATAL ERROR in z_pinch.cpp ProblemGenerator" << std::endl
         << "Magnetic fields not enabled" << std::endl;
     ATHENA_ERROR(msg);
   }
-
-  Real pfloor = 1.e-2;
-  Real dfloor = 1.e-2;
 
   for (int k=ks; k<=ke; k++) {
     for (int j=js; j<=je; j++) {
@@ -266,40 +542,18 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
                                std::exp(-SQR(r-centre)/(2*SQR(emode_width))) * std::sin(2*PI/(rout-rin)*(r-rin));
         phydro->u(IM2,k,j,i) = 0.0;
         phydro->u(IM3,k,j,i) = 0.0;
+        pscalars->s(0,k,j,i) = 0.0;
+        pscalars->s(1,k,j,i) = 0.0;
       }
     }
   }
-
-  dens_init    = 0.;
-  pres_init    = 0.;
-  total_volume = 0.0;
-  AthenaArray<Real> vol(ncells1);
-  for (int k=ks; k<=ke; k++) {
-    for (int j=js; j<=je; j++) {
-      pcoord->CellVolume(k, j, is, ie, vol);
-      for (int i=is; i<=ie; i++) {
-        Real den  = phydro->u(IDN,k,j,i);
-        Real pres = phydro->u(IEN,k,j,i)*gm1;
-        dens_init    += den*vol(i);
-        pres_init    += pres*vol(i);
-        total_volume += vol(i);
-      }
-    }
-  }
-
-  #ifdef MPI_PARALLEL
-    MPI_Allreduce(MPI_IN_PLACE, &dens_init, 1, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
-    MPI_Allreduce(MPI_IN_PLACE, &pres_init, 1, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
-  #endif
-
-  std::cout << "dens_init = " << dens_init << "; press_init = " << pres_init << "\n";
 
   Real result;
   for (int i=is; i<=ie; ++i) {
     Real r = pcoord->x1v(i);
-    if (r < rpeak){
+    if (r < rpeak) {
       result = trapezoidalIntegration1(r, N, beta_correct, presmin, exppres, rpeak, rin);
-    } else{
+    } else {
       Real result_part1 = trapezoidalIntegration1(rpeak, N, beta_correct, presmin, exppres, rpeak, rin);
       Real result_part2 = trapezoidalIntegration2(rpeak, r, N, beta, exppres, rcSmooth, r_const);
       result = result_part1 + result_part2;
@@ -370,6 +624,18 @@ void InnerX1HardWall(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &prim,
       }
     }
   }
+  // User hydro boundaries do not automatically fill passive-scalar ghosts in this
+  // Athena++ version.  Continue concentration with zero gradient; Athena++ converts it
+  // back to conserved scalar mass using the boundary density after this callback.
+  for (int n=0; n<NSCALARS; ++n) {
+    for (int k=kl; k<=ku; ++k) {
+      for (int j=jl; j<=ju; ++j) {
+        for (int i=1; i<=ngh; ++i) {
+          pmb->pscalars->r(n,k,j,il-i) = pmb->pscalars->r(n,k,j,il);
+        }
+      }
+    }
+  }
   for (int k=kl; k<=ku; ++k) {
     for (int j=jl; j<=ju; ++j) {
 #pragma omp simd
@@ -402,16 +668,10 @@ void InnerX1HardWall(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &prim,
 //----------------------------------------------------------------------------------------
 // Function: OuterX1HardWall
 //
-// NOTE: The density BC here uses a power-law extrapolation (r^{-2}).
-// With the density source now located near rout, this BC will drain mass
-// injected near the outer boundary back out through the ghost zone each step.
-// If this causes unphysical behaviour (e.g. density source immediately cancelled
-// by the BC), switch the density ghost zone to zero-gradient (outflow):
-//   prim(IDN,k,j,iu+i) = prim(IDN,k,j,iu);
-// or a fixed floor value, depending on the intended physical setup.
+// Continue the marginal density and pressure power laws and B_theta proportional to 1/r.
 void OuterX1HardWall(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &prim,
                      FaceField &b, Real time, Real dt,
-                     int il, int iu, int jl, int ju, int kl, int ku, int ngh){
+                     int il, int iu, int jl, int ju, int kl, int ku, int ngh) {
   for (int n=0; n<(NHYDRO); ++n) {
     for (int k=kl; k<=ku; ++k) {
       for (int j=jl; j<=ju; ++j) {
@@ -420,11 +680,7 @@ void OuterX1HardWall(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &prim,
           for (int i=1; i<=ngh; ++i) {
             Real r     = pco->x1v(i+iu);
             Real r_out = pco->x1v(iu);
-            // CURRENT: power-law extrapolation. See note above about interaction
-            // with the outer-edge density source.
             prim(n,k,j,iu+i) = prim(n,k,j,(iu)) * pow(r/r_out,-2.);
-            // ALTERNATIVE (zero-gradient / outflow):
-            // prim(n,k,j,iu+i) = prim(n,k,j,iu);
           }
         } else if (n==(IPR)) {
 #pragma omp simd
@@ -443,6 +699,16 @@ void OuterX1HardWall(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &prim,
           for (int i=1; i<=ngh; ++i) {
             prim(n,k,j,iu+i) = 0.;
           }
+        }
+      }
+    }
+  }
+
+  for (int n=0; n<NSCALARS; ++n) {
+    for (int k=kl; k<=ku; ++k) {
+      for (int j=jl; j<=ju; ++j) {
+        for (int i=1; i<=ngh; ++i) {
+          pmb->pscalars->r(n,k,j,iu+i) = pmb->pscalars->r(n,k,j,iu);
         }
       }
     }
@@ -478,245 +744,127 @@ void OuterX1HardWall(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &prim,
 }
 
 //----------------------------------------------------------------------------------------
-// Function: AddDensity
-//
-// Density source: Gaussian centred at input_location_dens (near rout), width sigma_dens.
-// Pressure source: Gaussian centred at input_location (centre), width sigma. 
-// Sink: exponential sink at outer edge, normalised over the full domain.
-void AddDensity(MeshBlock *pmb, const Real time, const Real dt,
-              const AthenaArray<Real> &prim, const AthenaArray<Real> &prim_scalar,
-              const AthenaArray<Real> &bcc, AthenaArray<Real> &cons,
-              AthenaArray<Real> &cons_scalar) {
+//! \fn void ApplyFueling(...)
+//! \brief Apply fixed-rate particle/heat/tracer sources, then the post-source edge sink.
+void ApplyFueling(MeshBlock *pmb, const Real time, const Real dt,
+                  const AthenaArray<Real> &prim,
+                  const AthenaArray<Real> &prim_scalar,
+                  const AthenaArray<Real> &bcc, AthenaArray<Real> &cons,
+                  AthenaArray<Real> &cons_scalar) {
+  (void)time;
+  (void)prim;
+  (void)prim_scalar;
+  if (dt <= 0.0) return;
 
-  if (time == 0.0) return;
-
-  Real gamma       = pmb->peos->GetGamma();
-  Real gm1         = gamma - 1.0;
-  Real local_igm1  = 1. / gm1;
-
-  Real dens_curr   = 0.0;
-  Real pres_curr   = 0.0;
-  Real d_added     = 0.0;
-  Real energy_added = 0.0;
-
-  Real Lz     = pmb->pmy_mesh->mesh_size.x3max - pmb->pmy_mesh->mesh_size.x3min;
-  Real Ltheta = pmb->pmy_mesh->mesh_size.x2max - pmb->pmy_mesh->mesh_size.x2min;
-
-  // Separate normalisation factors for the density and pressure Gaussians.
-  // norm_dens uses sigma_dens and input_location_dens (outer edge).
-  // norm_pres uses sigma and input_location (centre). Both normalise over the 2D
-  // theta-z domain; the radial Gaussian normalisation is handled implicitly by the
-  // injection rate multiplied by dens_init / pres_init.
-  Real norm_dens = 1. / (std::sqrt(2. * M_PI) * sigma_dens * Lz * Ltheta);
-  Real norm_pres = 1. / (std::sqrt(2. * M_PI) * sigma       * Lz * Ltheta);
-
+  const Real gm1 = pmb->peos->GetGamma()-1.0;
+  const Real rout = pmb->pmy_mesh->mesh_size.x1max;
   AthenaArray<Real> vol(pmb->ncells1);
 
-  //------------------------------------------------------------------------------------
-  // Source stage: inject density at outer edge, pressure at centre.
-  for (int k = pmb->ks; k <= pmb->ke; k++) {
-    for (int j = pmb->js; j <= pmb->je; j++) {
+  Real mass_added = 0.0;
+  Real thermal_added = 0.0;
+  Real scalar1_added = 0.0;
+  Real scalar2_added = 0.0;
+  Real total_energy_added = 0.0;
+
+  // Source step.  Momentum and magnetic field are unchanged, corresponding to material
+  // injected at rest.  The two tracer sources are independent conserved scalar masses.
+  for (int k=pmb->ks; k<=pmb->ke; ++k) {
+    for (int j=pmb->js; j<=pmb->je; ++j) {
       pmb->pcoord->CellVolume(k, j, pmb->is, pmb->ie, vol);
-#pragma omp simd
-      for (int i = pmb->is; i <= pmb->ie; i++) {
-        Real x    = pmb->pcoord->x1v(i);
-        Real den  = cons(IDN, k, j, i);
-        Real iden = 1. / den;
+      for (int i=pmb->is; i<=pmb->ie; ++i) {
+        Real r = pmb->pcoord->x1v(i);
+        Real g_p = UnnormalizedGaussian(r, r_p, sigma_p)/source_integral_p;
+        Real g_rho = UnnormalizedGaussian(r, r_rho, sigma_rho)/source_integral_rho;
+        Real dmass = dt*injection_rate_dens*dens_init*g_rho;
+        Real dpressure = dt*injection_rate_pres*pres_init*g_p;
+        Real dscalar1 = dt*injection_rate_scalar1*dens_init*g_p;
+        Real dscalar2 = dt*injection_rate_scalar2*dens_init*g_rho;
 
-        Real tot_energy      = cons(IEN, k, j, i);
-        Real kinetic_energy  = 0.5 * iden * (SQR(cons(IM1, k, j, i)) +
-                                              SQR(cons(IM2, k, j, i)) +
-                                              SQR(cons(IM3, k, j, i)));
-        Real magnetic_energy = 0.5 * (SQR(bcc(IB1, k, j, i)) +
-                                      SQR(bcc(IB2, k, j, i)) +
-                                      SQR(bcc(IB3, k, j, i)));
-        Real plasma_energy   = tot_energy - kinetic_energy - magnetic_energy;
+        Real den_old = cons(IDN,k,j,i);
+        Real energy_old = cons(IEN,k,j,i);
+        Real momentum2 = SQR(cons(IM1,k,j,i))+SQR(cons(IM2,k,j,i))
+                         + SQR(cons(IM3,k,j,i));
+        Real kinetic_old = 0.5*momentum2/den_old;
+        Real magnetic = 0.5*(SQR(bcc(IB1,k,j,i))+SQR(bcc(IB2,k,j,i))
+                             + SQR(bcc(IB3,k,j,i)));
+        Real thermal_old = energy_old-kinetic_old-magnetic;
 
-        // Density Gaussian: centred at input_location_dens (outer edge) with sigma_dens.
-        Real gaussian_dens = norm_dens * exp(-0.5 * SQR(x - input_location_dens) / SQR(sigma_dens));
+        cons(IDN,k,j,i) = den_old+dmass;
+        cons_scalar(0,k,j,i) += dscalar1;
+        cons_scalar(1,k,j,i) += dscalar2;
+        Real kinetic_new = 0.5*momentum2/cons(IDN,k,j,i);
+        Real thermal_new = thermal_old+dpressure/gm1;
+        cons(IEN,k,j,i) = kinetic_new+magnetic+thermal_new;
 
-        // Pressure Gaussian: centred at input_location (centre) with sigma. 
-        Real gaussian_pres = norm_pres * exp(-0.5 * SQR(x - input_location) / SQR(sigma));
-
-        Real dens_to_add = dt * injection_rate_dens * dens_init * gaussian_dens;
-        Real prs_to_add  = dt * injection_rate_pres * pres_init * gaussian_pres;
-
-        // Add mass
-        cons(IDN, k, j, i) += dens_to_add;
-        d_added            += dens_to_add * vol(i);
-
-        // Rescale kinetic energy for momentum conservation (injected material is at rest)
-        Real kinetic_energy_new = kinetic_energy * den / cons(IDN, k, j, i);
-
-        // Add thermal energy from pressure source
-        plasma_energy  += prs_to_add * local_igm1;
-        energy_added   += prs_to_add * local_igm1 * vol(i);
-
-        cons(IEN, k, j, i) = kinetic_energy_new + magnetic_energy + plasma_energy;
+        mass_added += dmass*vol(i);
+        thermal_added += dpressure/gm1*vol(i);
+        scalar1_added += dscalar1*vol(i);
+        scalar2_added += dscalar2*vol(i);
+        total_energy_added += (cons(IEN,k,j,i)-energy_old)*vol(i);
       }
     }
   }
 
-#ifdef MPI_PARALLEL
-  MPI_Allreduce(MPI_IN_PLACE, &d_added,      1, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
-  MPI_Allreduce(MPI_IN_PLACE, &energy_added, 1, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
-#endif
+  AthenaArray<Real> &diag = pmb->ruser_meshblock_data[0];
+  diag(kMassSourceRate) = mass_added/dt;
+  diag(kThermalSourceRate) = thermal_added/dt;
+  diag(kScalar1SourceRate) = scalar1_added/dt;
+  diag(kScalar2SourceRate) = scalar2_added/dt;
+  diag(kTotalEnergySourceRate) = total_energy_added/dt;
 
-  dens_added           = d_added;
-  thermal_energy_added = energy_added;
+  Real mass_removed = 0.0;
+  Real thermal_removed = 0.0;
+  Real scalar1_removed = 0.0;
+  Real scalar2_removed = 0.0;
+  Real total_energy_removed = 0.0;
 
-  if (Globals::my_rank == 0) {
-    std::cout << "Δmass      = " << d_added
-              << ";  Δth-energy = " << energy_added << "\n";
-  }
-
-  //------------------------------------------------------------------------------------
-  // Compute integrated density and pressure after injection.
-  for (int k = pmb->ks; k <= pmb->ke; k++) {
-    for (int j = pmb->js; j <= pmb->je; j++) {
+  // Sink step.  Scalars receive exactly the density reduction factor, so concentration
+  // is unchanged by local removal and tracer mass cannot accumulate artificially.
+  for (int k=pmb->ks; k<=pmb->ke; ++k) {
+    for (int j=pmb->js; j<=pmb->je; ++j) {
       pmb->pcoord->CellVolume(k, j, pmb->is, pmb->ie, vol);
-#pragma omp simd
-      for (int i = pmb->is; i <= pmb->ie; i++) {
-        Real density_value  = cons(IDN, k, j, i);
-        Real pressure_value = gm1 * (cons(IEN, k, j, i)
-           - 0.5/density_value*(SQR(cons(IM1,k,j,i))+SQR(cons(IM2,k,j,i))+SQR(cons(IM3,k,j,i)))
-           - 0.5*(SQR(bcc(IB1,k,j,i))+SQR(bcc(IB2,k,j,i))+SQR(bcc(IB3,k,j,i))));
-        dens_curr += density_value  * vol(i);
-        pres_curr += pressure_value * vol(i);
-      }
-    }
-  }
-
-#ifdef MPI_PARALLEL
-  MPI_Allreduce(MPI_IN_PLACE, &dens_curr, 1, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
-  MPI_Allreduce(MPI_IN_PLACE, &pres_curr, 1, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
-#endif
-
-  pressure_current = pres_curr;
-
-  if (Globals::my_rank == 0) {
-    std::cout << "dens_init = " << dens_init << "; pres_init = " << pres_init << "\n";
-    std::cout << "dens_curr = " << dens_curr << "; pres_curr = " << pres_curr << "\n";
-  }
-
-  //------------------------------------------------------------------------------------
-  // Sink stage: normalised exponential sink at outer edge.
-
-  Real sink_total = 0.0;
-  Real rout       = pmb->pmy_mesh->mesh_size.x1max;
-
-  // First pass: accumulate un-normalised sink profile over this rank's cells.
-  for (int k = pmb->ks; k <= pmb->ke; k++) {
-    for (int j = pmb->js; j <= pmb->je; j++) {
-      pmb->pcoord->CellVolume(k, j, pmb->is, pmb->ie, vol);
-#pragma omp simd
-      for (int i = pmb->is; i <= pmb->ie; i++) {
-        Real x            = pmb->pcoord->x1v(i);
-        Real sink_profile = exp((x - rout) / sink_width);
-        sink_total       += sink_profile * vol(i);
-      }
-    }
-  }
-
-  // Reduce sink_total across all MPI ranks BEFORE computing sink_norm.
-#ifdef MPI_PARALLEL
-  MPI_Allreduce(MPI_IN_PLACE, &sink_total, 1, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
-#endif
-
-  Real sink_norm = 1.0 / sink_total;
-  Real d_removed = 0.0, e_removed = 0.0;
-
-  // Second pass: apply normalised sink.
-  for (int k = pmb->ks; k <= pmb->ke; k++) {
-    for (int j = pmb->js; j <= pmb->je; j++) {
-      pmb->pcoord->CellVolume(k, j, pmb->is, pmb->ie, vol);
-#pragma omp simd
-      for (int i = pmb->is; i <= pmb->ie; i++) {
-        Real x            = pmb->pcoord->x1v(i);
-        Real sink_profile = exp((x - rout) / sink_width);
-        Real sink         = sink_profile * sink_norm;
-
-        Real den              = cons(IDN, k, j, i);
-        Real den_old          = den;
-        Real iden             = 1.0 / den;
-        Real kinetic_energy   = 0.5 * iden * (SQR(cons(IM1, k, j, i)) +
-                                               SQR(cons(IM2, k, j, i)) +
-                                               SQR(cons(IM3, k, j, i)));
-        Real magnetic_energy  = 0.5 * (SQR(bcc(IB1, k, j, i)) +
-                                       SQR(bcc(IB2, k, j, i)) +
-                                       SQR(bcc(IB3, k, j, i)));
-        Real plasma_energy    = cons(IEN, k, j, i) - kinetic_energy - magnetic_energy;
-        Real plasma_energy_old = plasma_energy;
-
-        Real red_fact_dens = 1.0 - dt * sink * sink_rate_dens;
-        Real red_fact_Eth  = 1.0 - dt * sink * sink_rate_energy;
-
-        if (red_fact_dens < 0.0) {
-          std::cout << "### WARNING in SinkStep: red_fact_dens < 0 at (k,j,i)=("
-                    << k << "," << j << "," << i << ") = " << red_fact_dens
-                    << "  [dt * sink * sink_rate_dens = "
-                    << (dt * sink * sink_rate_dens) << "]" << std::endl;
-        }
-        if (red_fact_Eth < 0.0) {
-          std::cout << "### WARNING in SinkStep: red_fact_Eth < 0 at (k,j,i)=("
-                    << k << "," << j << "," << i << ") = " << red_fact_Eth
-                    << "  [dt * sink * sink_rate_energy = "
-                    << (dt * sink * sink_rate_energy) << "]" << std::endl;
+      for (int i=pmb->is; i<=pmb->ie; ++i) {
+        Real r = pmb->pcoord->x1v(i);
+        Real w = UnnormalizedSink(r, rout)/sink_integral;
+        Real density_factor = 1.0-dt*sink_rate_dens*w;
+        Real thermal_factor = 1.0-dt*sink_rate_energy*w;
+        if (density_factor <= 0.0 || thermal_factor <= 0.0) {
+          std::stringstream msg;
+          msg << "### FATAL ERROR in z_pinch_fueled sink: negative reduction factor at r="
+              << r << "; reduce sink rate or timestep\n";
+          ATHENA_ERROR(msg);
         }
 
-        cons(IDN, k, j, i) = den_old * red_fact_dens;
-        Real den_removed_val = den_old - cons(IDN, k, j, i);
-        d_removed           += den_removed_val * vol(i);
+        Real den_old = cons(IDN,k,j,i);
+        Real scalar1_old = cons_scalar(0,k,j,i);
+        Real scalar2_old = cons_scalar(1,k,j,i);
+        Real energy_old = cons(IEN,k,j,i);
+        Real momentum2 = SQR(cons(IM1,k,j,i))+SQR(cons(IM2,k,j,i))
+                         + SQR(cons(IM3,k,j,i));
+        Real kinetic_old = 0.5*momentum2/den_old;
+        Real magnetic = 0.5*(SQR(bcc(IB1,k,j,i))+SQR(bcc(IB2,k,j,i))
+                             + SQR(bcc(IB3,k,j,i)));
+        Real thermal_old = energy_old-kinetic_old-magnetic;
 
-        Real kinetic_energy_new = kinetic_energy * den / cons(IDN, k, j, i);
+        cons(IDN,k,j,i) = den_old*density_factor;
+        cons_scalar(0,k,j,i) = scalar1_old*density_factor;
+        cons_scalar(1,k,j,i) = scalar2_old*density_factor;
+        Real kinetic_new = 0.5*momentum2/cons(IDN,k,j,i);
+        Real thermal_new = thermal_old*thermal_factor;
+        cons(IEN,k,j,i) = kinetic_new+magnetic+thermal_new;
 
-        plasma_energy    = plasma_energy_old * red_fact_Eth;
-        Real eth_removed  = plasma_energy_old - plasma_energy;
-        e_removed        += eth_removed * vol(i);
-
-        cons(IEN, k, j, i) = kinetic_energy_new + magnetic_energy + plasma_energy;
+        mass_removed += (den_old-cons(IDN,k,j,i))*vol(i);
+        scalar1_removed += (scalar1_old-cons_scalar(0,k,j,i))*vol(i);
+        scalar2_removed += (scalar2_old-cons_scalar(1,k,j,i))*vol(i);
+        thermal_removed += (thermal_old-thermal_new)*vol(i);
+        total_energy_removed += (energy_old-cons(IEN,k,j,i))*vol(i);
       }
     }
   }
 
-#ifdef MPI_PARALLEL
-  MPI_Allreduce(MPI_IN_PLACE, &d_removed, 1, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
-  MPI_Allreduce(MPI_IN_PLACE, &e_removed, 1, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
-#endif
-
-  dens_removed   = d_removed;
-  energy_removed = e_removed;
-
-  if (Globals::my_rank == 0) {
-    std::cout << "Δmass_removed     = " << d_removed
-              << ";  Δth-energy_removed = " << e_removed << "\n";
-  }
-
-  //------------------------------------------------------------------------------------
-  // Diagnostic: final integrated density and pressure.
-  Real dens_fin = 0.0, pres_fin = 0.0;
-  for (int k = pmb->ks; k <= pmb->ke; k++) {
-    for (int j = pmb->js; j <= pmb->je; j++) {
-      pmb->pcoord->CellVolume(k, j, pmb->is, pmb->ie, vol);
-#pragma omp simd
-      for (int i = pmb->is; i <= pmb->ie; i++) {
-        Real density_value  = cons(IDN, k, j, i);
-        Real pressure_value = gm1 * (cons(IEN, k, j, i)
-                             - 0.5 / density_value * (SQR(cons(IM1, k, j, i)) +
-                                                      SQR(cons(IM2, k, j, i)) +
-                                                      SQR(cons(IM3, k, j, i)))
-                             - 0.5 * (SQR(bcc(IB1, k, j, i)) +
-                                      SQR(bcc(IB2, k, j, i)) +
-                                      SQR(bcc(IB3, k, j, i))));
-        dens_fin += density_value  * vol(i);
-        pres_fin += pressure_value * vol(i);
-      }
-    }
-  }
-#ifdef MPI_PARALLEL
-  MPI_Allreduce(MPI_IN_PLACE, &dens_fin, 1, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
-  MPI_Allreduce(MPI_IN_PLACE, &pres_fin, 1, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
-#endif
-
-  return;
+  diag(kMassSinkRate) = mass_removed/dt;
+  diag(kThermalSinkRate) = thermal_removed/dt;
+  diag(kScalar1SinkRate) = scalar1_removed/dt;
+  diag(kScalar2SinkRate) = scalar2_removed/dt;
+  diag(kTotalEnergySinkRate) = total_energy_removed/dt;
 }
