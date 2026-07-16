@@ -504,6 +504,7 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
   Real Lz    = pmy_mesh->mesh_size.x3max - pmy_mesh->mesh_size.x3min;
   Real Amp   = pin->GetOrAddReal("problem", "amp", 0.01);
   Real emode_width = pin->GetOrAddReal("problem", "emode_width", 0.2);
+  Real perturbation_kz = pin->GetOrAddReal("problem", "perturbation_kz", 2*PI/Lz);
   Real rcSmooth    = pin->GetOrAddReal("problem", "rcSmooth", 5.);
   Real beta_correct = 1/(1+exp(-rcSmooth*(r_const-rpeak))) * beta +
                       1/(1+exp(-rcSmooth*(rpeak-r_const))) * beta * (pow(1+SQR(r_const-rpeak),-exppres/2.));
@@ -523,6 +524,14 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
         << "Magnetic fields not enabled" << std::endl;
     ATHENA_ERROR(msg);
   }
+  Real axial_mode_number = perturbation_kz*Lz/(2*PI);
+  if (perturbation_kz <= 0.0
+      || std::abs(axial_mode_number-std::round(axial_mode_number)) > 1.0e-10) {
+    std::stringstream msg;
+    msg << "### FATAL ERROR in z_pinch_fueled: perturbation_kz*Lz/(2*pi)="
+        << axial_mode_number << " must be a positive integer for periodic x3 boundaries\n";
+    ATHENA_ERROR(msg);
+  }
 
   for (int k=ks; k<=ke; k++) {
     for (int j=js; j<=je; j++) {
@@ -538,7 +547,9 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
              phydro->u(IEN,k,j,i) = 1/gm1 * ( 1/(1+exp(-rcSmooth*(r_const-r))) * beta * (pow(1+SQR(r-rpeak),-exppres/2.)) +
                                               1/(1+exp(-rcSmooth*(r-r_const))) * beta * (pow(1+SQR(r_const-rpeak),-exppres/2.)) );
         }
-        phydro->u(IM1,k,j,i) = phydro->u(IDN,k,j,i) * Amp * std::sin(2*PI/Lz * pcoord->x3v(k)) *
+        phydro->u(IM1,k,j,i) = phydro->u(IDN,k,j,i) * Amp
+                               * std::sin(perturbation_kz
+                                          *(pcoord->x3v(k)-pmy_mesh->mesh_size.x3min)) *
                                std::exp(-SQR(r-centre)/(2*SQR(emode_width))) * std::sin(2*PI/(rout-rin)*(r-rin));
         phydro->u(IM2,k,j,i) = 0.0;
         phydro->u(IM3,k,j,i) = 0.0;
