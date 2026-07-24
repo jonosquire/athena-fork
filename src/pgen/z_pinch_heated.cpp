@@ -36,6 +36,7 @@
 #include "../mesh/mesh.hpp"
 #include "../parameter_input.hpp"
 #include "../scalars/scalars.hpp"
+#include "z_pinch_from_array_reader.hpp"
 
 // Forward declarations
 void InnerX1HardWall(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &prim,
@@ -696,6 +697,26 @@ double trapezoidalIntegration2(double rpeak, double end, int N, double beta,
 //========================================================================================
 //! \fn void MeshBlock::ProblemGenerator(ParameterInput *pin)
 void MeshBlock::ProblemGenerator(ParameterInput *pin) {
+  // Preserve the complete driven z_pinch_heated evolution; replace only initialization.
+  if (pin->DoesParameterExist("problem", "input_filename")) {
+    // The converter writes lexicographic blocks with x1 fastest, independent of gid.
+    int file_block = static_cast<int>(
+        (loc.lx3*pmy_mesh->nrbx2 + loc.lx2)*pmy_mesh->nrbx1 + loc.lx1);
+    int no_op_reads = 0;
+#ifdef MPI_PARALLEL
+    // Collective HDF5 calls must be balanced when ranks own unequal block counts.
+    if (lid == pmy_mesh->nblist[Globals::my_rank] - 1) {
+      for (int rank=0; rank<Globals::nranks; ++rank) {
+        no_op_reads = std::max(
+            no_op_reads,
+            pmy_mesh->nblist[rank] - pmy_mesh->nblist[Globals::my_rank]);
+      }
+    }
+#endif
+    InitializeZPinchFromArray(this, pin, file_block, no_op_reads);
+    return;
+  }
+
   Real d0 = pin->GetOrAddReal("problem", "d0", 1.0);
   beta    = pin->GetOrAddReal("problem", "beta", 0.5);
   Real rpeak    = pin->GetReal("problem", "rpeak");
