@@ -8,8 +8,8 @@
 //! \brief Heated cylindrical z-pinch with target-mass feedback and passive tracers
 //!
 //! This file sets up the cylindrical z pinch problem for Athena++ by defining initial
-//! conditions, boundary conditions, a fixed heat source/edge thermal sink, and an
-//! MPI-safe global controller which deposits mass at a chosen radial location.
+//! conditions, boundary conditions, a fixed heat source, a selectable edge thermal
+//! sink, and an MPI-safe global controller which deposits mass at a chosen radius.
 //
 //========================================================================================
 
@@ -66,6 +66,7 @@ enum BlockDiagnostic {
   kScalar2ControlRate,
   kTotalEnergySourceRate,
   kTotalEnergySinkRate,
+  kThermostatPowerRate,
   kNumBlockDiagnostics
 };
 
@@ -80,9 +81,11 @@ enum HistoryDiagnostic {
   kHistScalar2ControlRate,
   kHistTotalEnergySourceRate,
   kHistTotalEnergySinkRate,
+  kHistThermostatPowerRate,
   kPressureSourceNormalization,
   kDensitySourceNormalization,
   kSinkNormalization,
+  kSinkWeightedTemperature,
   kMassFluxProbe1,
   kMassFluxProbe2,
   kMassFluxProbe3,
@@ -93,15 +96,21 @@ enum HistoryDiagnostic {
   kNumHistoryDiagnostics
 };
 
+enum SinkType {
+  kFractionalSink = 0,
+  kThermostatSink
+};
+
 Real bin, rin, presmin, densmin, beta, dens_init, pres_init, total_volume;
 Real sigma_p, sigma_rho, r_p, r_rho;
 Real source_integral_p, source_integral_rho, sink_integral;
 Real sink_width, injection_rate_pres, injection_rate_scalar1, sink_rate_energy;
+Real thermostat_t_set, thermostat_tau;
 Real mass_target, tau_mass, mass_rate_max, max_remove_fraction;
 Real mass_source_scalar2_fraction;
 Real d0, rpeak, expdens, exppres, r_const, rcSmooth;
 Real probe_radius[3], probe_volume[3];
-int forcing_flag, heating_flag, mass_control_flag, allow_mass_removal;
+int forcing_flag, heating_flag, mass_control_flag, allow_mass_removal, sink_type;
 
 Real GetNewOrLegacyReal(ParameterInput *pin, const char *new_name,
                         const char *legacy_name, Real default_value) {
@@ -151,7 +160,7 @@ Real HistoryDiagnostics(MeshBlock *pmb, int iout) {
     return result;
   }
 
-  if (iout >= kHistMassControlRate && iout <= kHistTotalEnergySinkRate) {
+  if (iout >= kHistMassControlRate && iout <= kHistThermostatPowerRate) {
     int block_index = iout-kHistMassControlRate;
     return pmb->ruser_meshblock_data[0](block_index);
   }
@@ -172,6 +181,32 @@ Real HistoryDiagnostics(MeshBlock *pmb, int iout) {
           } else {
             result += vol(i)*UnnormalizedSink(r, rout)/sink_integral;
           }
+        }
+      }
+    }
+    return result;
+  }
+
+  if (iout == kSinkWeightedTemperature) {
+    Real result = 0.0;
+    Real rout = pmb->pmy_mesh->mesh_size.x1max;
+    Real gm1 = pmb->peos->GetGamma()-1.0;
+    for (int k=pmb->ks; k<=pmb->ke; ++k) {
+      for (int j=pmb->js; j<=pmb->je; ++j) {
+        pmb->pcoord->CellVolume(k, j, pmb->is, pmb->ie, vol);
+        for (int i=pmb->is; i<=pmb->ie; ++i) {
+          Real den = pmb->phydro->u(IDN,k,j,i);
+          Real momentum2 = SQR(pmb->phydro->u(IM1,k,j,i))
+                           + SQR(pmb->phydro->u(IM2,k,j,i))
+                           + SQR(pmb->phydro->u(IM3,k,j,i));
+          Real kinetic = 0.5*momentum2/den;
+          Real magnetic = 0.5*(SQR(pmb->pfield->bcc(IB1,k,j,i))
+                               + SQR(pmb->pfield->bcc(IB2,k,j,i))
+                               + SQR(pmb->pfield->bcc(IB3,k,j,i)));
+          Real thermal = pmb->phydro->u(IEN,k,j,i)-kinetic-magnetic;
+          Real temperature = gm1*thermal/den;
+          Real weight = UnnormalizedSink(pmb->pcoord->x1v(i), rout);
+          result += vol(i)*weight*temperature/sink_integral;
         }
       }
     }
@@ -277,6 +312,23 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   sigma_rho = GetNewOrLegacyReal(pin, "sigma_rho", "sigma_dens", 0.15);
   sink_width = pin->GetOrAddReal("problem", "sink_width", 0.3);
 
+  std::string sink_type_input =
+      pin->GetOrAddString("problem", "sink_type", "fractional");
+  if (sink_type_input == "fractional") {
+    sink_type = kFractionalSink;
+    thermostat_t_set = 0.0;
+    thermostat_tau = 1.0;
+  } else if (sink_type_input == "thermostat") {
+    sink_type = kThermostatSink;
+    thermostat_t_set = pin->GetOrAddReal("problem", "t_set", 1.6e-3);
+    thermostat_tau = pin->GetOrAddReal("problem", "tau_T", 1.0);
+  } else {
+    std::stringstream msg;
+    msg << "### FATAL ERROR in z_pinch_heated: sink_type must be "
+        << "fractional or thermostat; got " << sink_type_input << "\n";
+    ATHENA_ERROR(msg);
+  }
+
   injection_rate_pres  = pin->GetOrAddReal("problem", "injection_rate_pres", 0.1);
   injection_rate_scalar1 = pin->GetOrAddReal("problem", "injection_rate_scalar1", 1.e-4);
   sink_rate_energy   = pin->GetOrAddReal("problem", "sink_rate_energy", 0.1);
@@ -310,6 +362,13 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
       || (allow_mass_removal != 0 && allow_mass_removal != 1)) {
     std::stringstream msg;
     msg << "### FATAL ERROR in z_pinch_heated: invalid mass-controller parameter\n";
+    ATHENA_ERROR(msg);
+  }
+  if (sink_type == kThermostatSink
+      && (thermostat_t_set < 0.0 || thermostat_tau <= 0.0)) {
+    std::stringstream msg;
+    msg << "### FATAL ERROR in z_pinch_heated: thermostat requires "
+        << "t_set >= 0 and tau_T > 0\n";
     ATHENA_ERROR(msg);
   }
   for (int n=0; n<3; ++n) {
@@ -417,9 +476,11 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   EnrollUserHistoryOutput(kHistScalar2ControlRate, HistoryDiagnostics, "imp_ctrl");
   EnrollUserHistoryOutput(kHistTotalEnergySourceRate, HistoryDiagnostics, "Etot_src");
   EnrollUserHistoryOutput(kHistTotalEnergySinkRate, HistoryDiagnostics, "Etot_sink");
+  EnrollUserHistoryOutput(kHistThermostatPowerRate, HistoryDiagnostics, "therm_power");
   EnrollUserHistoryOutput(kPressureSourceNormalization, HistoryDiagnostics, "Gp_int");
   EnrollUserHistoryOutput(kDensitySourceNormalization, HistoryDiagnostics, "Grho_int");
   EnrollUserHistoryOutput(kSinkNormalization, HistoryDiagnostics, "W_int");
+  EnrollUserHistoryOutput(kSinkWeightedTemperature, HistoryDiagnostics, "edge_T_w");
   EnrollUserHistoryOutput(kMassFluxProbe1, HistoryDiagnostics, "rho_ur_p1");
   EnrollUserHistoryOutput(kMassFluxProbe2, HistoryDiagnostics, "rho_ur_p2");
   EnrollUserHistoryOutput(kMassFluxProbe3, HistoryDiagnostics, "rho_ur_p3");
@@ -438,6 +499,15 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
               << "  integral(g_rho)=" << source_integral_rho << "\n"
               << "  sink_width=" << sink_width
               << "  integral(w)=" << sink_integral << "\n"
+              << "  sink_type="
+              << (sink_type == kFractionalSink ? "fractional" : "thermostat");
+    if (sink_type == kFractionalSink) {
+      std::cout << " sink_rate_energy=" << sink_rate_energy << "\n";
+    } else {
+      std::cout << " t_set=" << thermostat_t_set
+                << " tau_T=" << thermostat_tau << "\n";
+    }
+    std::cout
               << "  mass_target=" << mass_target << " tau_mass=" << tau_mass
               << " rate_max=" << mass_rate_max
               << " allow_removal=" << allow_mass_removal << "\n"
@@ -486,6 +556,7 @@ void Mesh::UserWorkInLoop() {
       diag(kScalar1SourceRate) = 0.0;
       diag(kTotalEnergySourceRate) = 0.0;
       diag(kTotalEnergySinkRate) = 0.0;
+      diag(kThermostatPowerRate) = 0.0;
     }
   }
   if (mass_control_flag == 0 || dt <= 0.0) return;
@@ -1047,41 +1118,102 @@ void ApplyHeating(MeshBlock *pmb, const Real time, const Real dt,
 
   Real thermal_removed = 0.0;
   Real total_energy_removed = 0.0;
+  Real thermostat_power = 0.0;
 
-  // The only outer sink in this pgen removes thermal energy.  In particular, it does
-  // not deplete density and cannot make an artificial low-density CFL layer.
-  for (int k=pmb->ks; k<=pmb->ke; ++k) {
-    for (int j=pmb->js; j<=pmb->je; ++j) {
-      pmb->pcoord->CellVolume(k, j, pmb->is, pmb->ie, vol);
-      for (int i=pmb->is; i<=pmb->ie; ++i) {
-        Real r = pmb->pcoord->x1v(i);
-        Real w = UnnormalizedSink(r, rout)/sink_integral;
-        Real thermal_factor = 1.0-dt*sink_rate_energy*w;
-        if (thermal_factor <= 0.0) {
-          std::stringstream msg;
-          msg << "### FATAL ERROR in z_pinch_heated thermal sink: negative factor at r="
-              << r << "; reduce sink rate or timestep\n";
-          ATHENA_ERROR(msg);
+  // Both sink choices remove only thermal energy.  The fractional branch is kept
+  // algebraically identical to the original implementation so legacy inputs retain
+  // bitwise-identical fluid updates.
+  if (sink_type == kFractionalSink) {
+    for (int k=pmb->ks; k<=pmb->ke; ++k) {
+      for (int j=pmb->js; j<=pmb->je; ++j) {
+        pmb->pcoord->CellVolume(k, j, pmb->is, pmb->ie, vol);
+        for (int i=pmb->is; i<=pmb->ie; ++i) {
+          Real r = pmb->pcoord->x1v(i);
+          Real w = UnnormalizedSink(r, rout)/sink_integral;
+          Real thermal_factor = 1.0-dt*sink_rate_energy*w;
+          if (thermal_factor <= 0.0) {
+            std::stringstream msg;
+            msg << "### FATAL ERROR in z_pinch_heated thermal sink: "
+                << "negative factor at r=" << r
+                << "; reduce sink rate or timestep\n";
+            ATHENA_ERROR(msg);
+          }
+
+          Real den_old = cons(IDN,k,j,i);
+          Real energy_old = cons(IEN,k,j,i);
+          Real momentum2 = SQR(cons(IM1,k,j,i))+SQR(cons(IM2,k,j,i))
+                           + SQR(cons(IM3,k,j,i));
+          Real kinetic_old = 0.5*momentum2/den_old;
+          Real magnetic = 0.5*(SQR(bcc(IB1,k,j,i))+SQR(bcc(IB2,k,j,i))
+                               + SQR(bcc(IB3,k,j,i)));
+          Real thermal_old = energy_old-kinetic_old-magnetic;
+
+          Real thermal_new = thermal_old*thermal_factor;
+          cons(IEN,k,j,i) = kinetic_old+magnetic+thermal_new;
+
+          thermal_removed += (thermal_old-thermal_new)*vol(i);
+          total_energy_removed += (energy_old-cons(IEN,k,j,i))*vol(i);
         }
-
-        Real den_old = cons(IDN,k,j,i);
-        Real energy_old = cons(IEN,k,j,i);
-        Real momentum2 = SQR(cons(IM1,k,j,i))+SQR(cons(IM2,k,j,i))
-                         + SQR(cons(IM3,k,j,i));
-        Real kinetic_old = 0.5*momentum2/den_old;
-        Real magnetic = 0.5*(SQR(bcc(IB1,k,j,i))+SQR(bcc(IB2,k,j,i))
-                             + SQR(bcc(IB3,k,j,i)));
-        Real thermal_old = energy_old-kinetic_old-magnetic;
-
-        Real thermal_new = thermal_old*thermal_factor;
-        cons(IEN,k,j,i) = kinetic_old+magnetic+thermal_new;
-
-        thermal_removed += (thermal_old-thermal_new)*vol(i);
-        total_energy_removed += (energy_old-cons(IEN,k,j,i))*vol(i);
       }
     }
+  } else {
+    // Thermostat normalization: use the unnormalized exponential
+    // chi(r)=exp[(r-rout)/sink_width], with chi(rout)=1.  Equivalently, chi is
+    // the old normalized sink weight times V_norm=sink_integral.  Thus the
+    // temperature excess at the boundary relaxes with the literal input time tau_T:
+    //
+    //   (T-t_set)_new = (1-dt*chi/tau_T) (T-t_set)_old.
+    //
+    // No volume-normalization factor appears in the local rate.  The precomputed
+    // sink_integral is used only to normalize the edge-temperature diagnostic.
+    if (dt > thermostat_tau) {
+      std::stringstream msg;
+      msg << "### FATAL ERROR in z_pinch_heated thermostat: dt/tau_T="
+          << dt/thermostat_tau
+          << " exceeds one; increase tau_T or reduce the timestep\n";
+      ATHENA_ERROR(msg);
+    }
+    for (int k=pmb->ks; k<=pmb->ke; ++k) {
+      for (int j=pmb->js; j<=pmb->je; ++j) {
+        pmb->pcoord->CellVolume(k, j, pmb->is, pmb->ie, vol);
+        for (int i=pmb->is; i<=pmb->ie; ++i) {
+          Real r = pmb->pcoord->x1v(i);
+          Real shape = UnnormalizedSink(r, rout);
+          Real relaxation_fraction = dt*shape/thermostat_tau;
+          if (relaxation_fraction > 1.0) {
+            std::stringstream msg;
+            msg << "### FATAL ERROR in z_pinch_heated thermostat: "
+                << "negative excess-temperature factor at r=" << r
+                << "; increase tau_T or reduce the timestep\n";
+            ATHENA_ERROR(msg);
+          }
+
+          Real den_old = cons(IDN,k,j,i);
+          Real energy_old = cons(IEN,k,j,i);
+          Real momentum2 = SQR(cons(IM1,k,j,i))+SQR(cons(IM2,k,j,i))
+                           + SQR(cons(IM3,k,j,i));
+          Real kinetic_old = 0.5*momentum2/den_old;
+          Real magnetic = 0.5*(SQR(bcc(IB1,k,j,i))+SQR(bcc(IB2,k,j,i))
+                               + SQR(bcc(IB3,k,j,i)));
+          Real thermal_old = energy_old-kinetic_old-magnetic;
+          Real temperature_old = gm1*thermal_old/den_old;
+
+          if (temperature_old > thermostat_t_set) {
+            Real excess_thermal =
+                den_old*(temperature_old-thermostat_t_set)/gm1;
+            Real thermal_new = thermal_old-relaxation_fraction*excess_thermal;
+            cons(IEN,k,j,i) = kinetic_old+magnetic+thermal_new;
+
+            thermal_removed += (thermal_old-thermal_new)*vol(i);
+            total_energy_removed += (energy_old-cons(IEN,k,j,i))*vol(i);
+          }
+        }
+      }
+    }
+    thermostat_power = thermal_removed/dt;
   }
 
   diag(kThermalSinkRate) = thermal_removed/dt;
   diag(kTotalEnergySinkRate) = total_energy_removed/dt;
+  diag(kThermostatPowerRate) = thermostat_power;
 }

@@ -1,0 +1,105 @@
+<comment>
+problem = Target-mass edge fueling with a one-sided edge-temperature thermostat
+
+<job>
+problem_id = z_pinch_heated_thermostat
+
+<output1>
+file_type   = hdf5
+variable    = prim
+dt          = 5.0
+ghost_zones = 0
+
+<output2>
+file_type   = hst
+dt          = 0.1
+data_format = %24.16e
+
+<output3>
+file_type = rst
+dt        = 25.0
+
+<time>
+cfl_number = 0.3
+nlim       = -1
+tlim       = 300.0
+integrator = vl2
+xorder     = 2
+ncycle_out = 1000
+
+<mesh>
+nx1    = 64
+x1min  = 0.5
+x1max  = 3.0
+ix1_bc = user
+ox1_bc = user
+nx2    = 2
+x2min  = -3.141592653589793
+x2max  =  3.141592653589793
+ix2_bc = periodic
+ox2_bc = periodic
+nx3    = 144
+x3min  = 0.0
+x3max  = 9.42477796076938
+ix3_bc = periodic
+ox3_bc = periodic
+
+<meshblock>
+nx1 = 32
+nx2 = 2
+nx3 = 48
+
+<hydro>
+gamma  = 1.666666666666667
+pfloor = 1.0e-8
+dfloor = 1.0e-8
+
+<problem>
+d0       = 1.0
+beta     = 0.1
+presmin  = 0.02
+densmin  = 0.9
+bin      = 2.50669
+rpeak    = 1.0
+r_const  = 2.0
+rcSmooth = 5.0
+exppres  = 2.0
+expdens  = 2.0
+N        = 10000
+
+amp             = 1.0e-3
+emode_width     = 0.5
+perturbation_kz = 2.0
+
+forcing_flag      = 1
+heating_flag      = 1
+mass_control_flag = 1
+
+r_p       = 1.0
+sigma_p   = 0.2
+r_rho     = 2.6
+sigma_rho = 0.10
+
+mass_target_factor = 1.20
+tau_mass             = 50.0
+mass_rate_max         = 1.0
+allow_mass_removal    = 0
+max_remove_fraction   = 0.10
+mass_source_scalar2_fraction = 1.0e-3
+
+injection_rate_pres    = 0.005
+injection_rate_scalar1 = 1.0e-5
+
+sink_width = 0.1
+sink_type  = thermostat
+t_set      = 0.0016
+# Explicit thermostat: require every source-step dt < tau_T.  This value is
+# suitable for the 64x2x144 example (dt is about 4.6e-3); production n384
+# runs can use about 1.25e-3 after checking their actual dt history.
+tau_T      = 0.005
+# Retained for easy runtime switching to sink_type=fractional; ignored by thermostat.
+sink_rate_energy = 52.6125
+
+mass_flux_probe1 = 1.0
+mass_flux_probe2 = 1.8
+mass_flux_probe3 = 2.6
