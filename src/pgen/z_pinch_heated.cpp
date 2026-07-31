@@ -67,6 +67,10 @@ enum BlockDiagnostic {
   kTotalEnergySourceRate,
   kTotalEnergySinkRate,
   kThermostatPowerRate,
+  kThermostatPowerConfinedRate,
+  kThermostatPowerRampRate,
+  kThermostatPowerSolInnerRate,
+  kThermostatPowerSolOuterRate,
   kNumBlockDiagnostics
 };
 
@@ -82,6 +86,10 @@ enum HistoryDiagnostic {
   kHistTotalEnergySourceRate,
   kHistTotalEnergySinkRate,
   kHistThermostatPowerRate,
+  kHistThermostatPowerConfinedRate,
+  kHistThermostatPowerRampRate,
+  kHistThermostatPowerSolInnerRate,
+  kHistThermostatPowerSolOuterRate,
   kPressureSourceNormalization,
   kDensitySourceNormalization,
   kSinkNormalization,
@@ -93,6 +101,14 @@ enum HistoryDiagnostic {
   kBoundaryEnergyFlux,
   kBoundaryScalar1Flux,
   kBoundaryScalar2Flux,
+  kInnerBoundaryMassFlux,
+  kInnerBoundaryEnergyFlux,
+  kInnerBoundaryScalar1Flux,
+  kInnerBoundaryScalar2Flux,
+  kOuterBoundaryMassFlux,
+  kOuterBoundaryEnergyFlux,
+  kOuterBoundaryScalar1Flux,
+  kOuterBoundaryScalar2Flux,
   kNumHistoryDiagnostics
 };
 
@@ -101,16 +117,18 @@ enum SinkType {
   kThermostatSink
 };
 
-Real bin, rin, presmin, densmin, beta, dens_init, pres_init, total_volume;
+Real bin, rin, presmin, densmin, inner_bc_pres, inner_bc_dens, beta;
+Real dens_init, pres_init, total_volume;
 Real sigma_p, sigma_rho, r_p, r_rho;
-Real source_integral_p, source_integral_rho, sink_integral;
+Real source_integral_p, source_integral_rho, sink_integral, thermostat_integral;
 Real sink_width, injection_rate_pres, injection_rate_scalar1, sink_rate_energy;
-Real thermostat_t_set, thermostat_tau;
+Real thermostat_t_set, thermostat_tau, thermostat_r_start, thermostat_ramp_width;
 Real mass_target, tau_mass, mass_rate_max, max_remove_fraction;
 Real mass_source_scalar2_fraction;
 Real d0, rpeak, expdens, exppres, r_const, rcSmooth;
 Real probe_radius[3], probe_volume[3];
 int forcing_flag, heating_flag, mass_control_flag, allow_mass_removal, sink_type;
+bool outer_bc_bfield_zerogradient;
 
 Real GetNewOrLegacyReal(ParameterInput *pin, const char *new_name,
                         const char *legacy_name, Real default_value) {
@@ -137,6 +155,22 @@ inline Real UnnormalizedSink(Real r, Real rout) {
   return std::exp((r-rout)/sink_width);
 }
 
+inline Real ThermostatMask(Real r) {
+  if (r <= thermostat_r_start) return 0.0;
+  if (r >= thermostat_r_start+thermostat_ramp_width) return 1.0;
+  Real x = (r-thermostat_r_start)/thermostat_ramp_width;
+  return 0.5*(1.0-std::cos(PI*x));
+}
+
+inline Real ActiveSinkShape(Real r, Real rout) {
+  return sink_type == kFractionalSink ? UnnormalizedSink(r, rout)
+                                     : ThermostatMask(r);
+}
+
+inline Real ActiveSinkIntegral() {
+  return sink_type == kFractionalSink ? sink_integral : thermostat_integral;
+}
+
 Real HistoryDiagnostics(MeshBlock *pmb, int iout) {
   AthenaArray<Real> vol(pmb->ncells1);
 
@@ -160,7 +194,7 @@ Real HistoryDiagnostics(MeshBlock *pmb, int iout) {
     return result;
   }
 
-  if (iout >= kHistMassControlRate && iout <= kHistThermostatPowerRate) {
+  if (iout >= kHistMassControlRate && iout <= kHistThermostatPowerSolOuterRate) {
     int block_index = iout-kHistMassControlRate;
     return pmb->ruser_meshblock_data[0](block_index);
   }
@@ -179,7 +213,7 @@ Real HistoryDiagnostics(MeshBlock *pmb, int iout) {
             result += vol(i)*UnnormalizedGaussian(r, r_rho, sigma_rho)
                       /source_integral_rho;
           } else {
-            result += vol(i)*UnnormalizedSink(r, rout)/sink_integral;
+            result += vol(i)*ActiveSinkShape(r, rout)/ActiveSinkIntegral();
           }
         }
       }
@@ -205,8 +239,8 @@ Real HistoryDiagnostics(MeshBlock *pmb, int iout) {
                                + SQR(pmb->pfield->bcc(IB3,k,j,i)));
           Real thermal = pmb->phydro->u(IEN,k,j,i)-kinetic-magnetic;
           Real temperature = gm1*thermal/den;
-          Real weight = UnnormalizedSink(pmb->pcoord->x1v(i), rout);
-          result += vol(i)*weight*temperature/sink_integral;
+          Real weight = ActiveSinkShape(pmb->pcoord->x1v(i), rout);
+          result += vol(i)*weight*temperature/ActiveSinkIntegral();
         }
       }
     }
@@ -269,6 +303,47 @@ Real HistoryDiagnostics(MeshBlock *pmb, int iout) {
     return result;
   }
 
+  if (iout >= kInnerBoundaryMassFlux && iout <= kOuterBoundaryScalar2Flux) {
+    if (pmb->pmy_mesh->time <= pmb->pmy_mesh->start_time) return 0.0;
+    int offset = iout-kInnerBoundaryMassFlux;
+    bool select_inner = offset < 4;
+    int quantity = offset % 4;
+    Real result = 0.0;
+    Real xmin = pmb->pmy_mesh->mesh_size.x1min;
+    Real xmax = pmb->pmy_mesh->mesh_size.x1max;
+    Real scale = std::max(std::abs(xmin), std::abs(xmax));
+    Real tol = 32.0*std::numeric_limits<Real>::epsilon()*std::max(scale, 1.0);
+    bool at_inner = std::abs(pmb->pcoord->x1f(pmb->is)-xmin) < tol;
+    bool at_outer = std::abs(pmb->pcoord->x1f(pmb->ie+1)-xmax) < tol;
+    for (int k=pmb->ks; k<=pmb->ke; ++k) {
+      for (int j=pmb->js; j<=pmb->je; ++j) {
+        if (select_inner && at_inner) {
+          Real area = pmb->pcoord->GetFace1Area(k,j,pmb->is);
+          if (quantity == 0) {
+            result -= area*pmb->phydro->flux[X1DIR](IDN,k,j,pmb->is);
+          } else if (quantity == 1) {
+            result -= area*pmb->phydro->flux[X1DIR](IEN,k,j,pmb->is);
+          } else {
+            result -= area*pmb->pscalars->s_flux[X1DIR](
+                quantity-2,k,j,pmb->is);
+          }
+        }
+        if (!select_inner && at_outer) {
+          Real area = pmb->pcoord->GetFace1Area(k,j,pmb->ie+1);
+          if (quantity == 0) {
+            result += area*pmb->phydro->flux[X1DIR](IDN,k,j,pmb->ie+1);
+          } else if (quantity == 1) {
+            result += area*pmb->phydro->flux[X1DIR](IEN,k,j,pmb->ie+1);
+          } else {
+            result += area*pmb->pscalars->s_flux[X1DIR](
+                quantity-2,k,j,pmb->ie+1);
+          }
+        }
+      }
+    }
+    return result;
+  }
+
   return 0.0;
 }
 
@@ -304,6 +379,19 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   rin      = pin->GetReal("mesh", "x1min");
   presmin  = pin->GetOrAddReal("problem", "presmin", 0.1);
   densmin  = pin->GetOrAddReal("problem", "densmin", 0.1);
+  // Keep the initial-equilibrium minima independent of the fixed inner-wall
+  // ghost state.  Defaults preserve the historical behaviour exactly.
+  inner_bc_pres = pin->GetOrAddReal("problem", "inner_bc_pres", presmin);
+  inner_bc_dens = pin->GetOrAddReal("problem", "inner_bc_dens", densmin);
+  const std::string outer_bc_bfield =
+      pin->GetOrAddString("problem", "outer_bc_bfield", "powerlaw");
+  if (outer_bc_bfield != "powerlaw" && outer_bc_bfield != "zerogradient") {
+    std::stringstream msg;
+    msg << "### FATAL ERROR in z_pinch_heated: outer_bc_bfield must be "
+        << "powerlaw or zerogradient; got " << outer_bc_bfield << "\n";
+    ATHENA_ERROR(msg);
+  }
+  outer_bc_bfield_zerogradient = (outer_bc_bfield == "zerogradient");
   beta     = pin->GetOrAddReal("problem", "beta", 0.5);
 
   r_p       = GetNewOrLegacyReal(pin, "r_p", "input_location", 1.0);
@@ -311,6 +399,9 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   r_rho     = GetNewOrLegacyReal(pin, "r_rho", "input_location_dens", 2.3);
   sigma_rho = GetNewOrLegacyReal(pin, "sigma_rho", "sigma_dens", 0.15);
   sink_width = pin->GetOrAddReal("problem", "sink_width", 0.3);
+  Real rout = mesh_size.x1max;
+  thermostat_r_start = rout-0.25;
+  thermostat_ramp_width = 0.05;
 
   std::string sink_type_input =
       pin->GetOrAddString("problem", "sink_type", "fractional");
@@ -322,6 +413,11 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
     sink_type = kThermostatSink;
     thermostat_t_set = pin->GetOrAddReal("problem", "t_set", 1.6e-3);
     thermostat_tau = pin->GetOrAddReal("problem", "tau_T", 1.0);
+    thermostat_r_start =
+        pin->GetOrAddReal("problem", "thermostat_r_start", thermostat_r_start);
+    thermostat_ramp_width =
+        pin->GetOrAddReal("problem", "thermostat_ramp_width",
+                          thermostat_ramp_width);
   } else {
     std::stringstream msg;
     msg << "### FATAL ERROR in z_pinch_heated: sink_type must be "
@@ -350,11 +446,23 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   probe_radius[1] = pin->GetOrAddReal("problem", "mass_flux_probe2", 1.8);
   probe_radius[2] = pin->GetOrAddReal("problem", "mass_flux_probe3", 2.4);
 
-  Real rout = mesh_size.x1max;
   if (sigma_p <= 0.0 || sigma_rho <= 0.0 || sink_width <= 0.0
       || r_p < rin || r_p > rout || r_rho < rin || r_rho > rout) {
     std::stringstream msg;
     msg << "### FATAL ERROR in z_pinch_heated: invalid source/sink location or width\n";
+    ATHENA_ERROR(msg);
+  }
+  if (rpeak < rin || rpeak >= rout) {
+    std::stringstream msg;
+    msg << "### FATAL ERROR in z_pinch_heated: rpeak must lie in "
+        << "[x1min,x1max); got rpeak=" << rpeak << " x1min=" << rin
+        << " x1max=" << rout << "\n";
+    ATHENA_ERROR(msg);
+  }
+  if (inner_bc_pres <= 0.0 || inner_bc_dens <= 0.0) {
+    std::stringstream msg;
+    msg << "### FATAL ERROR in z_pinch_heated: inner_bc_pres and "
+        << "inner_bc_dens must be positive\n";
     ATHENA_ERROR(msg);
   }
   if (tau_mass <= 0.0 || mass_rate_max < 0.0 || max_remove_fraction <= 0.0
@@ -365,10 +473,14 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
     ATHENA_ERROR(msg);
   }
   if (sink_type == kThermostatSink
-      && (thermostat_t_set < 0.0 || thermostat_tau <= 0.0)) {
+      && (thermostat_t_set < 0.0 || thermostat_tau <= 0.0
+          || thermostat_r_start < rin || thermostat_r_start >= rout
+          || thermostat_ramp_width <= 0.0
+          || thermostat_r_start+thermostat_ramp_width > rout)) {
     std::stringstream msg;
     msg << "### FATAL ERROR in z_pinch_heated: thermostat requires "
-        << "t_set >= 0 and tau_T > 0\n";
+        << "t_set >= 0, tau_T > 0, and a positive compact ramp wholly "
+        << "inside [x1min,x1max]\n";
     ATHENA_ERROR(msg);
   }
   for (int n=0; n<3; ++n) {
@@ -384,7 +496,7 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   // Compute exact root-grid cylindrical shell volumes and volume-centred radii.  This
   // duplicates Cylindrical's geometry formulas without needing MeshBlocks (which do not
   // exist yet here), and is safe before the OpenMP task list begins.
-  source_integral_p = source_integral_rho = sink_integral = 0.0;
+  source_integral_p = source_integral_rho = sink_integral = thermostat_integral = 0.0;
   dens_init = pres_init = total_volume = 0.0;
   Real dphi_dz = (mesh_size.x2max-mesh_size.x2min)
                  *(mesh_size.x3max-mesh_size.x3min);
@@ -420,6 +532,7 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
     source_integral_p += UnnormalizedGaussian(r, r_p, sigma_p)*shell_volume;
     source_integral_rho += UnnormalizedGaussian(r, r_rho, sigma_rho)*shell_volume;
     sink_integral += UnnormalizedSink(r, rout)*shell_volume;
+    thermostat_integral += ThermostatMask(r)*shell_volume;
     for (int n=0; n<3; ++n) {
       if (probe_radius[n] >= rm && probe_radius[n] < rp) {
         probe_volume[n] = shell_volume;
@@ -427,7 +540,9 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
     }
   }
 
-  if (source_integral_p <= 0.0 || source_integral_rho <= 0.0 || sink_integral <= 0.0) {
+  if (source_integral_p <= 0.0 || source_integral_rho <= 0.0
+      || sink_integral <= 0.0
+      || (sink_type == kThermostatSink && thermostat_integral <= 0.0)) {
     std::stringstream msg;
     msg << "### FATAL ERROR in z_pinch_heated: zero discrete source/sink integral\n";
     ATHENA_ERROR(msg);
@@ -477,6 +592,14 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   EnrollUserHistoryOutput(kHistTotalEnergySourceRate, HistoryDiagnostics, "Etot_src");
   EnrollUserHistoryOutput(kHistTotalEnergySinkRate, HistoryDiagnostics, "Etot_sink");
   EnrollUserHistoryOutput(kHistThermostatPowerRate, HistoryDiagnostics, "therm_power");
+  EnrollUserHistoryOutput(kHistThermostatPowerConfinedRate, HistoryDiagnostics,
+                          "therm_P_conf");
+  EnrollUserHistoryOutput(kHistThermostatPowerRampRate, HistoryDiagnostics,
+                          "therm_P_ramp");
+  EnrollUserHistoryOutput(kHistThermostatPowerSolInnerRate, HistoryDiagnostics,
+                          "therm_P_sol_in");
+  EnrollUserHistoryOutput(kHistThermostatPowerSolOuterRate, HistoryDiagnostics,
+                          "therm_P_sol_out");
   EnrollUserHistoryOutput(kPressureSourceNormalization, HistoryDiagnostics, "Gp_int");
   EnrollUserHistoryOutput(kDensitySourceNormalization, HistoryDiagnostics, "Grho_int");
   EnrollUserHistoryOutput(kSinkNormalization, HistoryDiagnostics, "W_int");
@@ -488,6 +611,22 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   EnrollUserHistoryOutput(kBoundaryEnergyFlux, HistoryDiagnostics, "Etot_bnd_out");
   EnrollUserHistoryOutput(kBoundaryScalar1Flux, HistoryDiagnostics, "ash_bnd_out");
   EnrollUserHistoryOutput(kBoundaryScalar2Flux, HistoryDiagnostics, "imp_bnd_out");
+  EnrollUserHistoryOutput(kInnerBoundaryMassFlux, HistoryDiagnostics,
+                          "mass_bnd_inner");
+  EnrollUserHistoryOutput(kInnerBoundaryEnergyFlux, HistoryDiagnostics,
+                          "Etot_bnd_inner");
+  EnrollUserHistoryOutput(kInnerBoundaryScalar1Flux, HistoryDiagnostics,
+                          "ash_bnd_inner");
+  EnrollUserHistoryOutput(kInnerBoundaryScalar2Flux, HistoryDiagnostics,
+                          "imp_bnd_inner");
+  EnrollUserHistoryOutput(kOuterBoundaryMassFlux, HistoryDiagnostics,
+                          "mass_bnd_outer");
+  EnrollUserHistoryOutput(kOuterBoundaryEnergyFlux, HistoryDiagnostics,
+                          "Etot_bnd_outer");
+  EnrollUserHistoryOutput(kOuterBoundaryScalar1Flux, HistoryDiagnostics,
+                          "ash_bnd_outer");
+  EnrollUserHistoryOutput(kOuterBoundaryScalar2Flux, HistoryDiagnostics,
+                          "imp_bnd_outer");
 
   if (Globals::my_rank == 0) {
     std::cout << "z_pinch_heated discrete setup:\n"
@@ -505,12 +644,22 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
       std::cout << " sink_rate_energy=" << sink_rate_energy << "\n";
     } else {
       std::cout << " t_set=" << thermostat_t_set
-                << " tau_T=" << thermostat_tau << "\n";
+                << " tau_T=" << thermostat_tau
+                << " r_start=" << thermostat_r_start
+                << " ramp_width=" << thermostat_ramp_width
+                << " compact_integral=" << thermostat_integral << "\n"
+                << "  thermostat diagnostic bands: confined=[" << rin << ","
+                << thermostat_r_start << "), ramp=[" << thermostat_r_start << ","
+                << thermostat_r_start+thermostat_ramp_width
+                << "), SOL-inner/SOL-outer split at "
+                << 0.5*(thermostat_r_start+thermostat_ramp_width+rout)
+                << "\n";
     }
     std::cout
               << "  mass_target=" << mass_target << " tau_mass=" << tau_mass
               << " rate_max=" << mass_rate_max
               << " allow_removal=" << allow_mass_removal << "\n"
+              << "  outer_bc_bfield=" << outer_bc_bfield << "\n"
               << "  analytic heat rate: Eth=" << injection_rate_pres*pres_init
                                  /(pin->GetReal("hydro", "gamma")-1.0)
               << " ash=" << injection_rate_scalar1*dens_init
@@ -557,6 +706,10 @@ void Mesh::UserWorkInLoop() {
       diag(kTotalEnergySourceRate) = 0.0;
       diag(kTotalEnergySinkRate) = 0.0;
       diag(kThermostatPowerRate) = 0.0;
+      diag(kThermostatPowerConfinedRate) = 0.0;
+      diag(kThermostatPowerRampRate) = 0.0;
+      diag(kThermostatPowerSolInnerRate) = 0.0;
+      diag(kThermostatPowerSolOuterRate) = 0.0;
     }
   }
   if (mass_control_flag == 0 || dt <= 0.0) return;
@@ -708,6 +861,10 @@ void Mesh::UserWorkInLoop() {
 // Function: trapezoidalIntegration1
 double trapezoidalIntegration1(double r, int N, double p0, double presmin,
                                 double exppres, double rpeak, double rin) {
+  // When the equilibrium peak is at the inner wall there is no cosine
+  // shoulder to integrate.  Returning its exact zero-width limit avoids the
+  // otherwise removable 0/0 in PI/(rpeak-rin).
+  if (rpeak <= rin) return 0.0;
   double h = (r - rin) / N;
   double sum = 0;
   for (int m = 1; m < N; ++m) {
@@ -933,12 +1090,12 @@ void InnerX1HardWall(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &prim,
         if (n==(IDN)) {
 #pragma omp simd
           for (int i=1; i<=ngh; ++i) {
-            prim(n,k,j,il-i) = densmin;
+            prim(n,k,j,il-i) = inner_bc_dens;
           }
         } else if (n==(IPR)) {
 #pragma omp simd
           for (int i=1; i<=ngh; ++i) {
-            prim(n,k,j,il-i) = presmin;
+            prim(n,k,j,il-i) = inner_bc_pres;
           }
         } else {
 #pragma omp simd
@@ -993,7 +1150,8 @@ void InnerX1HardWall(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &prim,
 //----------------------------------------------------------------------------------------
 // Function: OuterX1HardWall
 //
-// Continue the marginal density and pressure power laws and B_theta proportional to 1/r.
+// Continue the marginal density and pressure power laws.  B_theta is either continued
+// proportional to 1/r (the historical/default behaviour) or with zero radial gradient.
 void OuterX1HardWall(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &prim,
                      FaceField &b, Real time, Real dt,
                      int il, int iu, int jl, int ju, int kl, int ku, int ngh) {
@@ -1051,9 +1209,13 @@ void OuterX1HardWall(MeshBlock *pmb, Coordinates *pco, AthenaArray<Real> &prim,
     for (int j=jl; j<=ju+1; ++j) {
 #pragma omp simd
       for (int i=1; i<=ngh; ++i) {
-        Real r     = pco->x1v(iu+i);
-        Real routv = pco->x1v(iu);
-        b.x2f(k,j,(iu+i)) = 1/r * b.x2f(k,j,iu) * routv;
+        if (outer_bc_bfield_zerogradient) {
+          b.x2f(k,j,(iu+i)) = b.x2f(k,j,iu);
+        } else {
+          Real r     = pco->x1v(iu+i);
+          Real routv = pco->x1v(iu);
+          b.x2f(k,j,(iu+i)) = 1/r * b.x2f(k,j,iu) * routv;
+        }
       }
     }
   }
@@ -1119,6 +1281,10 @@ void ApplyHeating(MeshBlock *pmb, const Real time, const Real dt,
   Real thermal_removed = 0.0;
   Real total_energy_removed = 0.0;
   Real thermostat_power = 0.0;
+  Real thermostat_removed_confined = 0.0;
+  Real thermostat_removed_ramp = 0.0;
+  Real thermostat_removed_sol_inner = 0.0;
+  Real thermostat_removed_sol_outer = 0.0;
 
   // Both sink choices remove only thermal energy.  The fractional branch is kept
   // algebraically identical to the original implementation so legacy inputs retain
@@ -1157,15 +1323,16 @@ void ApplyHeating(MeshBlock *pmb, const Real time, const Real dt,
       }
     }
   } else {
-    // Thermostat normalization: use the unnormalized exponential
-    // chi(r)=exp[(r-rout)/sink_width], with chi(rout)=1.  Equivalently, chi is
-    // the old normalized sink weight times V_norm=sink_integral.  Thus the
-    // temperature excess at the boundary relaxes with the literal input time tau_T:
+    // The compact thermostat mask is exactly zero in the confined region,
+    // rises from zero to one across a half-cosine ramp, and is one in the
+    // outer SOL.  Thus the temperature excess in the full-strength region
+    // relaxes with the literal input time tau_T:
     //
     //   (T-t_set)_new = (1-dt*chi/tau_T) (T-t_set)_old.
     //
     // No volume-normalization factor appears in the local rate.  The precomputed
-    // sink_integral is used only to normalize the edge-temperature diagnostic.
+    // thermostat_integral is used only to normalize the edge-temperature
+    // diagnostic.
     if (dt > thermostat_tau) {
       std::stringstream msg;
       msg << "### FATAL ERROR in z_pinch_heated thermostat: dt/tau_T="
@@ -1178,7 +1345,7 @@ void ApplyHeating(MeshBlock *pmb, const Real time, const Real dt,
         pmb->pcoord->CellVolume(k, j, pmb->is, pmb->ie, vol);
         for (int i=pmb->is; i<=pmb->ie; ++i) {
           Real r = pmb->pcoord->x1v(i);
-          Real shape = UnnormalizedSink(r, rout);
+          Real shape = ThermostatMask(r);
           Real relaxation_fraction = dt*shape/thermostat_tau;
           if (relaxation_fraction > 1.0) {
             std::stringstream msg;
@@ -1206,6 +1373,18 @@ void ApplyHeating(MeshBlock *pmb, const Real time, const Real dt,
 
             thermal_removed += (thermal_old-thermal_new)*vol(i);
             total_energy_removed += (energy_old-cons(IEN,k,j,i))*vol(i);
+            Real removed = (thermal_old-thermal_new)*vol(i);
+            Real ramp_end = thermostat_r_start+thermostat_ramp_width;
+            Real sol_mid = 0.5*(ramp_end+rout);
+            if (r < thermostat_r_start) {
+              thermostat_removed_confined += removed;
+            } else if (r < ramp_end) {
+              thermostat_removed_ramp += removed;
+            } else if (r < sol_mid) {
+              thermostat_removed_sol_inner += removed;
+            } else {
+              thermostat_removed_sol_outer += removed;
+            }
           }
         }
       }
@@ -1216,4 +1395,8 @@ void ApplyHeating(MeshBlock *pmb, const Real time, const Real dt,
   diag(kThermalSinkRate) = thermal_removed/dt;
   diag(kTotalEnergySinkRate) = total_energy_removed/dt;
   diag(kThermostatPowerRate) = thermostat_power;
+  diag(kThermostatPowerConfinedRate) = thermostat_removed_confined/dt;
+  diag(kThermostatPowerRampRate) = thermostat_removed_ramp/dt;
+  diag(kThermostatPowerSolInnerRate) = thermostat_removed_sol_inner/dt;
+  diag(kThermostatPowerSolOuterRate) = thermostat_removed_sol_outer/dt;
 }

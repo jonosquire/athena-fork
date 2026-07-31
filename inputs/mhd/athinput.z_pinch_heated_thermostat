@@ -92,11 +92,13 @@ injection_rate_scalar1 = 1.0e-5
 
 sink_width = 0.1
 sink_type  = thermostat
-t_set      = 0.0016
-# Explicit thermostat: require every source-step dt < tau_T.  This value is
-# suitable for the 64x2x144 example (dt is about 4.6e-3); production n384
-# runs can use about 1.25e-3 after checking their actual dt history.
-tau_T      = 0.005
+t_set      = 0.02
+# Exactly zero cooling at and inside r=2.75, followed by a smooth half-cosine
+# transition to full-strength cooling over 0.05 radial units.
+thermostat_r_start = 2.75
+thermostat_ramp_width = 0.05
+# Explicit thermostat: require every source-step dt <= tau_T.
+tau_T      = 0.01
 # Retained for easy runtime switching to sink_type=fractional; ignored by thermostat.
 sink_rate_energy = 52.6125
 
