@@ -8,8 +8,9 @@
 //! \brief Heated cylindrical z-pinch with target-mass feedback and passive tracers
 //!
 //! This file sets up the cylindrical z pinch problem for Athena++ by defining initial
-//! conditions, boundary conditions, a fixed heat source, a selectable edge thermal
-//! sink, and an MPI-safe global controller which deposits mass at a chosen radius.
+//! conditions, boundary conditions, a fixed heat source, selectable edge thermal and
+//! material sinks, and an MPI-safe global controller which deposits mass at a chosen
+//! radius.
 //
 //========================================================================================
 
@@ -59,6 +60,12 @@ namespace {
 enum BlockDiagnostic {
   kMassControlRate = 0,
   kMassControlRequestedRate,
+  kMassSinkRequestedRate,
+  kMassSinkRate,
+  kMassSinkScalar1Rate,
+  kMassSinkScalar2Rate,
+  kMassSinkTotalEnergyRate,
+  kMassSinkLimitedVolume,
   kThermalSourceRate,
   kThermalSinkRate,
   kScalar1SourceRate,
@@ -74,6 +81,12 @@ enum HistoryDiagnostic {
   kThermalEnergy = 0,
   kHistMassControlRate,
   kHistMassControlRequestedRate,
+  kHistMassSinkRequestedRate,
+  kHistMassSinkRate,
+  kHistMassSinkScalar1Rate,
+  kHistMassSinkScalar2Rate,
+  kHistMassSinkTotalEnergyRate,
+  kHistMassSinkLimitedVolume,
   kHistThermalSourceRate,
   kHistThermalSinkRate,
   kHistScalar1SourceRate,
@@ -93,6 +106,10 @@ enum HistoryDiagnostic {
   kBoundaryEnergyFlux,
   kBoundaryScalar1Flux,
   kBoundaryScalar2Flux,
+  kInnerBoundaryMassFlux,
+  kOuterBoundaryMassFlux,
+  kInnerBoundaryEnergyFlux,
+  kOuterBoundaryEnergyFlux,
   kNumHistoryDiagnostics
 };
 
@@ -107,10 +124,12 @@ Real source_integral_p, source_integral_rho, sink_integral;
 Real sink_width, injection_rate_pres, injection_rate_scalar1, sink_rate_energy;
 Real thermostat_t_set, thermostat_tau;
 Real mass_target, tau_mass, mass_rate_max, max_remove_fraction;
+Real sink_rate_dens, mass_sink_density_floor, mass_sink_max_fraction;
 Real mass_source_scalar2_fraction;
 Real d0, rpeak, expdens, exppres, r_const, rcSmooth;
 Real probe_radius[3], probe_volume[3];
-int forcing_flag, heating_flag, mass_control_flag, allow_mass_removal, sink_type;
+int forcing_flag, heating_flag, mass_control_flag, allow_mass_removal, mass_sink_flag;
+int sink_type;
 
 Real GetNewOrLegacyReal(ParameterInput *pin, const char *new_name,
                         const char *legacy_name, Real default_value) {
@@ -269,6 +288,36 @@ Real HistoryDiagnostics(MeshBlock *pmb, int iout) {
     return result;
   }
 
+  if (iout >= kInnerBoundaryMassFlux && iout <= kOuterBoundaryEnergyFlux) {
+    if (pmb->pmy_mesh->time <= pmb->pmy_mesh->start_time) return 0.0;
+    Real xmin = pmb->pmy_mesh->mesh_size.x1min;
+    Real xmax = pmb->pmy_mesh->mesh_size.x1max;
+    Real scale = std::max(std::abs(xmin), std::abs(xmax));
+    Real tol = 32.0*std::numeric_limits<Real>::epsilon()*std::max(scale, 1.0);
+    bool at_inner = std::abs(pmb->pcoord->x1f(pmb->is)-xmin) < tol;
+    bool at_outer = std::abs(pmb->pcoord->x1f(pmb->ie+1)-xmax) < tol;
+    bool want_inner = (iout == kInnerBoundaryMassFlux
+                       || iout == kInnerBoundaryEnergyFlux);
+    bool want_energy = (iout == kInnerBoundaryEnergyFlux
+                        || iout == kOuterBoundaryEnergyFlux);
+    Real result = 0.0;
+    for (int k=pmb->ks; k<=pmb->ke; ++k) {
+      for (int j=pmb->js; j<=pmb->je; ++j) {
+        if (want_inner && at_inner) {
+          Real area = pmb->pcoord->GetFace1Area(k,j,pmb->is);
+          int variable = want_energy ? IEN : IDN;
+          result -= area*pmb->phydro->flux[X1DIR](variable,k,j,pmb->is);
+        }
+        if (!want_inner && at_outer) {
+          Real area = pmb->pcoord->GetFace1Area(k,j,pmb->ie+1);
+          int variable = want_energy ? IEN : IDN;
+          result += area*pmb->phydro->flux[X1DIR](variable,k,j,pmb->ie+1);
+        }
+      }
+    }
+    return result;
+  }
+
   return 0.0;
 }
 
@@ -335,6 +384,12 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   tau_mass = pin->GetOrAddReal("problem", "tau_mass", 50.0);
   mass_rate_max = pin->GetOrAddReal("problem", "mass_rate_max", 0.0);
   max_remove_fraction = pin->GetOrAddReal("problem", "max_remove_fraction", 0.1);
+  mass_sink_flag = pin->GetOrAddInteger("problem", "mass_sink_flag", 0);
+  sink_rate_dens = pin->GetOrAddReal("problem", "sink_rate_dens", 0.0);
+  mass_sink_density_floor =
+      pin->GetOrAddReal("problem", "mass_sink_density_floor", 0.0);
+  mass_sink_max_fraction =
+      pin->GetOrAddReal("problem", "mass_sink_max_fraction", 0.1);
   mass_source_scalar2_fraction =
       pin->GetOrAddReal("problem", "mass_source_scalar2_fraction", 1.e-3);
   allow_mass_removal = pin->GetOrAddInteger("problem", "allow_mass_removal", 0);
@@ -359,9 +414,13 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   }
   if (tau_mass <= 0.0 || mass_rate_max < 0.0 || max_remove_fraction <= 0.0
       || max_remove_fraction >= 1.0 || mass_source_scalar2_fraction < 0.0
-      || (allow_mass_removal != 0 && allow_mass_removal != 1)) {
+      || (allow_mass_removal != 0 && allow_mass_removal != 1)
+      || (mass_sink_flag != 0 && mass_sink_flag != 1)
+      || sink_rate_dens < 0.0 || mass_sink_density_floor < 0.0
+      || mass_sink_max_fraction <= 0.0 || mass_sink_max_fraction >= 1.0
+      || (mass_sink_flag == 1 && sink_rate_dens <= 0.0)) {
     std::stringstream msg;
-    msg << "### FATAL ERROR in z_pinch_heated: invalid mass-controller parameter\n";
+    msg << "### FATAL ERROR in z_pinch_heated: invalid mass-control/sink parameter\n";
     ATHENA_ERROR(msg);
   }
   if (sink_type == kThermostatSink
@@ -460,7 +519,7 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
     msg << "### FATAL ERROR in z_pinch_heated: forcing flags must be zero or one\n";
     ATHENA_ERROR(msg);
   }
-  if (heating_flag == 1) {
+  if (heating_flag == 1 || mass_sink_flag == 1) {
     EnrollUserExplicitSourceFunction(ApplyHeating);
   }
 
@@ -469,6 +528,17 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   EnrollUserHistoryOutput(kHistMassControlRate, HistoryDiagnostics, "mass_ctrl");
   EnrollUserHistoryOutput(kHistMassControlRequestedRate, HistoryDiagnostics,
                           "mass_ctrl_req");
+  EnrollUserHistoryOutput(kHistMassSinkRequestedRate, HistoryDiagnostics,
+                          "mass_sink_req");
+  EnrollUserHistoryOutput(kHistMassSinkRate, HistoryDiagnostics, "mass_sink");
+  EnrollUserHistoryOutput(kHistMassSinkScalar1Rate, HistoryDiagnostics,
+                          "ash_mass_sink");
+  EnrollUserHistoryOutput(kHistMassSinkScalar2Rate, HistoryDiagnostics,
+                          "imp_mass_sink");
+  EnrollUserHistoryOutput(kHistMassSinkTotalEnergyRate, HistoryDiagnostics,
+                          "Etot_mass_sink");
+  EnrollUserHistoryOutput(kHistMassSinkLimitedVolume, HistoryDiagnostics,
+                          "mass_sink_clip_vol");
   EnrollUserHistoryOutput(kHistThermalSourceRate, HistoryDiagnostics, "Eth_src");
   EnrollUserHistoryOutput(kHistThermalSinkRate, HistoryDiagnostics, "Eth_sink");
   EnrollUserHistoryOutput(kHistScalar1SourceRate, HistoryDiagnostics, "ash_src");
@@ -488,6 +558,14 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   EnrollUserHistoryOutput(kBoundaryEnergyFlux, HistoryDiagnostics, "Etot_bnd_out");
   EnrollUserHistoryOutput(kBoundaryScalar1Flux, HistoryDiagnostics, "ash_bnd_out");
   EnrollUserHistoryOutput(kBoundaryScalar2Flux, HistoryDiagnostics, "imp_bnd_out");
+  EnrollUserHistoryOutput(kInnerBoundaryMassFlux, HistoryDiagnostics,
+                          "mass_bnd_inner");
+  EnrollUserHistoryOutput(kOuterBoundaryMassFlux, HistoryDiagnostics,
+                          "mass_bnd_outer");
+  EnrollUserHistoryOutput(kInnerBoundaryEnergyFlux, HistoryDiagnostics,
+                          "Etot_bnd_inner");
+  EnrollUserHistoryOutput(kOuterBoundaryEnergyFlux, HistoryDiagnostics,
+                          "Etot_bnd_outer");
 
   if (Globals::my_rank == 0) {
     std::cout << "z_pinch_heated discrete setup:\n"
@@ -511,6 +589,10 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
               << "  mass_target=" << mass_target << " tau_mass=" << tau_mass
               << " rate_max=" << mass_rate_max
               << " allow_removal=" << allow_mass_removal << "\n"
+              << "  mass_sink_flag=" << mass_sink_flag
+              << " sink_rate_dens=" << sink_rate_dens
+              << " density_floor=" << mass_sink_density_floor
+              << " max_fraction=" << mass_sink_max_fraction << "\n"
               << "  analytic heat rate: Eth=" << injection_rate_pres*pres_init
                                  /(pin->GetReal("hydro", "gamma")-1.0)
               << " ash=" << injection_rate_scalar1*dens_init
@@ -550,7 +632,13 @@ void Mesh::UserWorkInLoop() {
     // ApplyHeating normally resets these rate diagnostics earlier in the same full
     // step.  If heating is disabled, reset them here so the controller's signed
     // energy change is a rate for this step rather than an accumulated value.
-    if (heating_flag == 0) {
+    if (heating_flag == 0 && mass_sink_flag == 0) {
+      diag(kMassSinkRequestedRate) = 0.0;
+      diag(kMassSinkRate) = 0.0;
+      diag(kMassSinkScalar1Rate) = 0.0;
+      diag(kMassSinkScalar2Rate) = 0.0;
+      diag(kMassSinkTotalEnergyRate) = 0.0;
+      diag(kMassSinkLimitedVolume) = 0.0;
       diag(kThermalSourceRate) = 0.0;
       diag(kThermalSinkRate) = 0.0;
       diag(kScalar1SourceRate) = 0.0;
@@ -1084,6 +1172,7 @@ void ApplyHeating(MeshBlock *pmb, const Real time, const Real dt,
   const Real gm1 = pmb->peos->GetGamma()-1.0;
   const Real rout = pmb->pmy_mesh->mesh_size.x1max;
   AthenaArray<Real> vol(pmb->ncells1);
+  AthenaArray<Real> &diag = pmb->ruser_meshblock_data[0];
 
   Real thermal_added = 0.0;
   Real scalar1_added = 0.0;
@@ -1091,30 +1180,104 @@ void ApplyHeating(MeshBlock *pmb, const Real time, const Real dt,
 
   // Heat and the core/ash tracer share a normalized Gaussian.  This step does not alter
   // density or momentum; target-mass feedback is applied once per full timestep below.
-  for (int k=pmb->ks; k<=pmb->ke; ++k) {
-    for (int j=pmb->js; j<=pmb->je; ++j) {
-      pmb->pcoord->CellVolume(k, j, pmb->is, pmb->ie, vol);
-      for (int i=pmb->is; i<=pmb->ie; ++i) {
-        Real r = pmb->pcoord->x1v(i);
-        Real g_p = UnnormalizedGaussian(r, r_p, sigma_p)/source_integral_p;
-        Real dpressure = dt*injection_rate_pres*pres_init*g_p;
-        Real dscalar1 = dt*injection_rate_scalar1*dens_init*g_p;
+  if (heating_flag == 1) {
+    for (int k=pmb->ks; k<=pmb->ke; ++k) {
+      for (int j=pmb->js; j<=pmb->je; ++j) {
+        pmb->pcoord->CellVolume(k, j, pmb->is, pmb->ie, vol);
+        for (int i=pmb->is; i<=pmb->ie; ++i) {
+          Real r = pmb->pcoord->x1v(i);
+          Real g_p = UnnormalizedGaussian(r, r_p, sigma_p)/source_integral_p;
+          Real dpressure = dt*injection_rate_pres*pres_init*g_p;
+          Real dscalar1 = dt*injection_rate_scalar1*dens_init*g_p;
 
-        Real energy_old = cons(IEN,k,j,i);
-        cons_scalar(0,k,j,i) += dscalar1;
-        cons(IEN,k,j,i) += dpressure/gm1;
+          Real energy_old = cons(IEN,k,j,i);
+          cons_scalar(0,k,j,i) += dscalar1;
+          cons(IEN,k,j,i) += dpressure/gm1;
 
-        thermal_added += dpressure/gm1*vol(i);
-        scalar1_added += dscalar1*vol(i);
-        total_energy_added += (cons(IEN,k,j,i)-energy_old)*vol(i);
+          thermal_added += dpressure/gm1*vol(i);
+          scalar1_added += dscalar1*vol(i);
+          total_energy_added += (cons(IEN,k,j,i)-energy_old)*vol(i);
+        }
       }
     }
   }
 
-  AthenaArray<Real> &diag = pmb->ruser_meshblock_data[0];
   diag(kThermalSourceRate) = thermal_added/dt;
   diag(kScalar1SourceRate) = scalar1_added/dt;
   diag(kTotalEnergySourceRate) = total_energy_added/dt;
+
+  Real mass_sink_requested = 0.0;
+  Real mass_removed = 0.0;
+  Real scalar1_mass_removed = 0.0;
+  Real scalar2_mass_removed = 0.0;
+  Real material_energy_removed = 0.0;
+  Real mass_sink_limited_volume = 0.0;
+
+  // Independent outer material sink.  Density, momentum, thermal and kinetic energy,
+  // and both conserved scalar masses receive the same local factor.  This preserves
+  // velocity, temperature, and scalar concentration while leaving magnetic energy
+  // unchanged.  The density floor is a removal cutoff, not an EOS floor: extraction is
+  // reduced before the update, so no untracked mass is injected by this operation.
+  if (mass_sink_flag == 1) {
+    for (int k=pmb->ks; k<=pmb->ke; ++k) {
+      for (int j=pmb->js; j<=pmb->je; ++j) {
+        pmb->pcoord->CellVolume(k, j, pmb->is, pmb->ie, vol);
+        for (int i=pmb->is; i<=pmb->ie; ++i) {
+          Real r = pmb->pcoord->x1v(i);
+          Real w = UnnormalizedSink(r, rout)/sink_integral;
+          Real requested_fraction = dt*sink_rate_dens*w;
+
+          Real den_old = cons(IDN,k,j,i);
+          Real energy_old = cons(IEN,k,j,i);
+          Real scalar1_old = cons_scalar(0,k,j,i);
+          Real scalar2_old = cons_scalar(1,k,j,i);
+          Real momentum2 = SQR(cons(IM1,k,j,i))+SQR(cons(IM2,k,j,i))
+                           + SQR(cons(IM3,k,j,i));
+          Real kinetic_old = 0.5*momentum2/den_old;
+          Real magnetic = 0.5*(SQR(bcc(IB1,k,j,i))+SQR(bcc(IB2,k,j,i))
+                               + SQR(bcc(IB3,k,j,i)));
+          Real thermal_old = energy_old-kinetic_old-magnetic;
+
+          mass_sink_requested += requested_fraction*den_old*vol(i);
+          Real floor_fraction = 1.0;
+          if (mass_sink_density_floor > 0.0) {
+            floor_fraction = std::max(
+                0.0, 1.0-mass_sink_density_floor/den_old);
+          }
+          Real applied_fraction = std::min(
+              requested_fraction, std::min(mass_sink_max_fraction, floor_fraction));
+          applied_fraction = std::max(applied_fraction, 0.0);
+          if (applied_fraction+32.0*std::numeric_limits<Real>::epsilon()
+              < requested_fraction) {
+            mass_sink_limited_volume += vol(i);
+          }
+
+          Real factor = 1.0-applied_fraction;
+          cons(IDN,k,j,i) = factor*den_old;
+          cons(IM1,k,j,i) *= factor;
+          cons(IM2,k,j,i) *= factor;
+          cons(IM3,k,j,i) *= factor;
+          cons_scalar(0,k,j,i) = factor*scalar1_old;
+          cons_scalar(1,k,j,i) = factor*scalar2_old;
+          cons(IEN,k,j,i) = factor*(kinetic_old+thermal_old)+magnetic;
+
+          mass_removed += (den_old-cons(IDN,k,j,i))*vol(i);
+          scalar1_mass_removed +=
+              (scalar1_old-cons_scalar(0,k,j,i))*vol(i);
+          scalar2_mass_removed +=
+              (scalar2_old-cons_scalar(1,k,j,i))*vol(i);
+          material_energy_removed += (energy_old-cons(IEN,k,j,i))*vol(i);
+        }
+      }
+    }
+  }
+
+  diag(kMassSinkRequestedRate) = mass_sink_requested/dt;
+  diag(kMassSinkRate) = mass_removed/dt;
+  diag(kMassSinkScalar1Rate) = scalar1_mass_removed/dt;
+  diag(kMassSinkScalar2Rate) = scalar2_mass_removed/dt;
+  diag(kMassSinkTotalEnergyRate) = material_energy_removed/dt;
+  diag(kMassSinkLimitedVolume) = mass_sink_limited_volume;
 
   Real thermal_removed = 0.0;
   Real total_energy_removed = 0.0;
@@ -1123,7 +1286,7 @@ void ApplyHeating(MeshBlock *pmb, const Real time, const Real dt,
   // Both sink choices remove only thermal energy.  The fractional branch is kept
   // algebraically identical to the original implementation so legacy inputs retain
   // bitwise-identical fluid updates.
-  if (sink_type == kFractionalSink) {
+  if (heating_flag == 1 && sink_type == kFractionalSink) {
     for (int k=pmb->ks; k<=pmb->ke; ++k) {
       for (int j=pmb->js; j<=pmb->je; ++j) {
         pmb->pcoord->CellVolume(k, j, pmb->is, pmb->ie, vol);
@@ -1156,7 +1319,7 @@ void ApplyHeating(MeshBlock *pmb, const Real time, const Real dt,
         }
       }
     }
-  } else {
+  } else if (heating_flag == 1) {
     // Thermostat normalization: use the unnormalized exponential
     // chi(r)=exp[(r-rout)/sink_width], with chi(rout)=1.  Equivalently, chi is
     // the old normalized sink weight times V_norm=sink_integral.  Thus the
